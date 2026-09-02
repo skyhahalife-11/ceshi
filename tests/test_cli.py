@@ -1,0 +1,97 @@
+"""命令行的验收：真的以子进程跑一遍，确认输出和退出码。"""
+from __future__ import annotations
+
+import json
+import os
+import subprocess
+import sys
+import unittest
+
+from tests.helpers import ROOT, Sandbox, write_json
+from tests.test_flows import cc_settings
+
+
+def run_cli(sb, *args, env_extra=None):
+    env = {"PATH": os.environ.get("PATH", ""), "HOME": sb.home,
+           "PYTHONIOENCODING": "utf-8", "NO_COLOR": "1"}
+    env.update(env_extra or {})
+    return subprocess.run(
+        [sys.executable, os.path.join(ROOT, "main.py"), "--cli",
+         "--profile", sb.profile_path, "--home", sb.home,
+         "--project-dir", sb.project, *args],
+        cwd=sb.project, env=env, capture_output=True, text=True, timeout=60)
+
+
+class TestCli(unittest.TestCase):
+    def test_healthy_config_exits_zero(self):
+        with Sandbox() as sb:
+            write_json(cc_settings(sb), {"env": {
+                "ANTHROPIC_BASE_URL": sb.base_url,
+                "ANTHROPIC_API_KEY": "yotta_pk_valid1234",
+                "ANTHROPIC_MODEL": "glm-5.3"}})
+            r = run_cli(sb, "--yes")
+            self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+            self.assertIn("Claude Code CLI", r.stdout)
+            self.assertIn("一切正常", r.stdout)
+
+    def test_fix_flow_prints_steps_and_succeeds(self):
+        with Sandbox() as sb:
+            write_json(cc_settings(sb), {"env": {
+                "ANTHROPIC_BASE_URL": sb.base_url + "/v1",
+                "ANTHROPIC_API_KEY": "yotta_pk_valid1234",
+                "ANTHROPIC_MODEL": "GLM-5.3"}})
+            r = run_cli(sb, "--yes")
+            self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+            self.assertIn("已备份原配置", r.stdout)
+            self.assertIn("修复成功", r.stdout)
+            after = json.load(open(cc_settings(sb), encoding="utf-8"))["env"]
+            self.assertEqual(after["ANTHROPIC_MODEL"], "glm-5.3")
+
+    def test_no_fix_flag_changes_nothing(self):
+        with Sandbox() as sb:
+            write_json(cc_settings(sb), {"env": {
+                "ANTHROPIC_BASE_URL": sb.base_url + "/v1",
+                "ANTHROPIC_API_KEY": "yotta_pk_valid1234",
+                "ANTHROPIC_MODEL": "glm-5.3"}})
+            before = open(cc_settings(sb), encoding="utf-8").read()
+            r = run_cli(sb, "--no-fix")
+            self.assertEqual(r.returncode, 3)
+            self.assertEqual(open(cc_settings(sb), encoding="utf-8").read(), before)
+
+    def test_gateway_down_exit_code_two(self):
+        with Sandbox(behavior="server_error") as sb:
+            write_json(cc_settings(sb), {"env": {
+                "ANTHROPIC_BASE_URL": sb.base_url,
+                "ANTHROPIC_API_KEY": "yotta_pk_valid1234",
+                "ANTHROPIC_MODEL": "glm-5.3"}})
+            r = run_cli(sb, "--yes")
+            self.assertEqual(r.returncode, 2, r.stdout)
+            self.assertIn("网关侧问题", r.stdout)
+
+    def test_key_is_masked_in_output(self):
+        with Sandbox() as sb:
+            write_json(cc_settings(sb), {"env": {
+                "ANTHROPIC_BASE_URL": sb.base_url,
+                "ANTHROPIC_API_KEY": "yotta_pk_topsecret9",
+                "ANTHROPIC_MODEL": "glm-5.3"}})
+            r = run_cli(sb, "--yes")
+            self.assertNotIn("topsecret", r.stdout)
+
+    def test_gui_flag_starts_server_without_opening_window(self):
+        """--gui 会起本地服务；这里只验证它能起来并给出一次性令牌地址。"""
+        with Sandbox() as sb:
+            code = (
+                "import sys; sys.path.insert(0, %r)\n"
+                "from suture.shell import launch\n"
+                "launch(profile_path=%r, project_dir=%r, open_ui=False)\n"
+            ) % (ROOT, sb.profile_path, sb.project)
+            r = subprocess.run([sys.executable, "-c", code], capture_output=True,
+                               text=True, timeout=30,
+                               env={"PATH": os.environ.get("PATH", ""), "HOME": sb.home})
+            self.assertEqual(r.returncode, 0, r.stderr)
+            self.assertIn("http://127.0.0.1:", r.stdout)
+            self.assertIn("token=", r.stdout)
+
+
+if __name__ == "__main__":
+    unittest.main(verbosity=2)

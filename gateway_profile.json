@@ -1,0 +1,170 @@
+{
+  "_comment": "AI Gate 网关规则。这份文件是外置的，网关新增模型或调整协议时只需要更新这里，不需要重新分发二进制。字段值来自与研发确认过的真实网关信息。",
+  "gateway_name": "AI Gate",
+  "profile_version": "2026-09-01",
+  "base_url": {
+    "canonical_root": "https://tower-ai.yottastudios.com/zi/proxy",
+    "require_https": true,
+    "_comment_suffix": "不同 harness 自己拼路径的习惯不一样，所以正确值按 harness 分别给。",
+    "per_harness_suffix": {
+      "claude_code": "",
+      "codex": "/v1",
+      "deepseek": ""
+    },
+    "allow_trailing_slash": true
+  },
+  "per_harness_request": {
+    "_comment": "各 harness 自己拼请求路径的方式不同，验证请求必须跟它真实会发的一致，否则会出现「修好了却验证不通」的误判。",
+    "claude_code": {
+      "suffix": "/v1/messages",
+      "style": "anthropic"
+    },
+    "codex": {
+      "suffix": "/chat/completions",
+      "style": "openai"
+    },
+    "deepseek": {
+      "suffix": "/v1/messages",
+      "style": "anthropic"
+    }
+  },
+  "auth": {
+    "gateway_issued_key_prefix": "yotta_pk_",
+    "accepted_headers": [
+      "x-api-key",
+      "Authorization",
+      "Token"
+    ],
+    "_comment": "网关同时兼容 Anthropic 原生的 x-api-key / Authorization，以及自定义的 Token 头。所以不存在“鉴权头填错位置”这一类必然失败的情况，但两个来源同时填仍然需要提示。",
+    "known_vendor_key_prefixes": {
+      "sk-ant-": "Anthropic 官方",
+      "sk-proj-": "OpenAI 官方",
+      "sk-or-": "OpenRouter",
+      "AIza": "Google 官方",
+      "sk-": "通用厂商 Key（OpenAI/DeepSeek 一类）"
+    }
+  },
+  "protocol_version": {
+    "check_enabled": false,
+    "header_name": "anthropic-version",
+    "min_version": "2023-06-01",
+    "_comment": "网关是否校验这个头尚未确认，默认关闭这项检测。确认后把 check_enabled 改成 true 即可启用，不需要改代码。"
+  },
+  "probe_model": "deepseek-v4-flash",
+  "models": [
+    {
+      "id": "gpt-5.5",
+      "family": "GPT",
+      "display": "GPT-5.5"
+    },
+    {
+      "id": "gpt-5.6",
+      "family": "GPT",
+      "display": "GPT-5.6"
+    },
+    {
+      "id": "gpt-5.6-sol",
+      "family": "GPT",
+      "display": "GPT-5.6 Sol"
+    },
+    {
+      "id": "gpt-5.6-terra",
+      "family": "GPT",
+      "display": "GPT-5.6 Terra"
+    },
+    {
+      "id": "gpt-5.6-luna",
+      "family": "GPT",
+      "display": "GPT-5.6 Luna"
+    },
+    {
+      "id": "claude-haiku-4-5",
+      "family": "Claude",
+      "display": "Claude Haiku 4.5"
+    },
+    {
+      "id": "claude-sonnet-5",
+      "family": "Claude",
+      "display": "Claude Sonnet 5"
+    },
+    {
+      "id": "claude-opus-4-8",
+      "family": "Claude",
+      "display": "Claude Opus 4.8"
+    },
+    {
+      "id": "claude-opus-5",
+      "family": "Claude",
+      "display": "Claude Opus 5"
+    },
+    {
+      "id": "gemini-3.1-pro-preview",
+      "family": "Gemini",
+      "display": "Gemini 3.1 Pro Preview"
+    },
+    {
+      "id": "gemini-3.5-flash",
+      "family": "Gemini",
+      "display": "Gemini 3.5 Flash"
+    },
+    {
+      "id": "gemini-3.7-flash",
+      "family": "Gemini",
+      "display": "Gemini 3.7 Flash"
+    },
+    {
+      "id": "deepseek-v4-pro",
+      "family": "DeepSeek",
+      "display": "DeepSeek V4 Pro"
+    },
+    {
+      "id": "deepseek-v4-flash",
+      "family": "DeepSeek",
+      "display": "DeepSeek V4 Flash"
+    },
+    {
+      "id": "deepseek-v4-flash-vision-exp",
+      "family": "DeepSeek",
+      "display": "deepseek-v4-flash-vision-exp"
+    },
+    {
+      "id": "glm-5.3",
+      "family": "GLM",
+      "display": "glm-5.3"
+    },
+    {
+      "id": "glm-5.3-flash",
+      "family": "GLM",
+      "display": "glm-5.3-flash"
+    },
+    {
+      "id": "kimi-k2.7-code",
+      "family": "Kimi",
+      "display": "kimi-k2.7-code"
+    },
+    {
+      "id": "kimi-k2.7-code-highspeed",
+      "family": "Kimi",
+      "display": "kimi-k2.7-code-highspeed"
+    },
+    {
+      "id": "kimi-k2.6",
+      "family": "Kimi",
+      "display": "kimi-k2.6"
+    },
+    {
+      "id": "kimi-k3",
+      "family": "Kimi",
+      "display": "kimi-k3"
+    }
+  ],
+  "known_settings_keys": [
+    "env",
+    "permissions",
+    "model",
+    "mcpServers",
+    "hooks",
+    "includeCoAuthoredBy",
+    "statusLine"
+  ]
+}

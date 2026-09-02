@@ -1,0 +1,65 @@
+name: build-suture
+
+# 六种目标组合各自在对应系统的机器上构建。
+# PyInstaller 不支持跨系统交叉编译，所以必须是六条并行的构建，不能在一台机器上出全部产物。
+on:
+  workflow_dispatch:
+  push:
+    tags: ["v*"]
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: windows-x64
+            runner: windows-latest
+          - target: windows-arm64
+            runner: windows-11-arm
+          - target: macos-universal      # universal2：一个文件同时覆盖 Intel 和 Apple Silicon
+            runner: macos-latest
+          - target: macos-x64            # 兜底：万一 universal2 的依赖凑不齐，仍单独出 Intel 版
+            runner: macos-15-intel
+          - target: linux-x64
+            runner: ubuntu-22.04         # 固定在较老的发行版上构建，产物才能在更新的系统上跑
+          - target: linux-arm64
+            runner: ubuntu-22.04-arm
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: 跑一遍验收测试
+        run: python -m unittest discover -s tests -t .
+
+      - name: 构建
+        shell: bash
+        run: |
+          python -m pip install --upgrade pip pyinstaller
+          python -m pip install pywebview || echo "pywebview unavailable on this target"
+          if [[ "${{ matrix.target }}" == "macos-x64" ]]; then export SUTURE_TARGET_ARCH=x86_64; fi
+          if [[ "${{ matrix.target }}" == "macos-universal" ]]; then export SUTURE_TARGET_ARCH=universal2; fi
+          python -m PyInstaller --clean --noconfirm build/suture.spec
+
+      # 签名是必须的，不是可选项：
+      # macOS 不签名 + 不公证，Gatekeeper 会直接拦截，非技术用户根本打不开；
+      # Windows 不签名会弹 SmartScreen 警告，对一个要读 Key 的工具很难建立信任。
+      # 证书就绪后在这里补上 codesign/notarytool 与 signtool 两步。
+
+      - name: 计算校验值
+        shell: bash
+        run: |
+          cd dist
+          if command -v shasum >/dev/null; then shasum -a 256 suture* > SHA256SUMS.txt;
+          else sha256sum suture* > SHA256SUMS.txt; fi
+          cat SHA256SUMS.txt
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: suture-${{ matrix.target }}
+          path: |
+            dist/suture*
+            dist/SHA256SUMS.txt

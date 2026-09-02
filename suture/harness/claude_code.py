@@ -1,0 +1,220 @@
+"""Claude Code CLI 适配器。
+
+配置载体：环境变量 + 全局 ~/.claude/settings.json + 项目级 <项目>/.claude/settings.json
+优先级：环境变量 > 项目级配置 > 全局配置
+鉴权：值直接存在配置里；填在 ANTHROPIC_API_KEY 走 x-api-key 头，
+      填在 ANTHROPIC_AUTH_TOKEN 走 Authorization 头。
+      另外 ANTHROPIC_CUSTOM_HEADERS（`Name: Value`，多头换行分隔）是平行的第三条通路：
+      只要里面的头名是网关认的那几个（比如 Token），就跟主字段一起被当成鉴权来源，
+      客户端会把两边都发出去，不能只认 API_KEY/AUTH_TOKEN 而把这条路当不存在。
+网关地址：不带 /v1，客户端自己会在后面拼 /v1/messages。
+"""
+from __future__ import annotations
+
+import json
+import os
+from typing import Any, Dict, List, Optional, Tuple
+
+from .base import (
+    ExtraAuthHeader, FIELD_AUTH, FIELD_BASE_URL, FIELD_MODEL, FileState,
+    HarnessAdapter, HarnessConfig, LayerValue, build_resolved, resolve_home,
+    resolve_project_dir,
+)
+
+ENV_BASE_URL = "ANTHROPIC_BASE_URL"
+ENV_API_KEY = "ANTHROPIC_API_KEY"
+ENV_AUTH_TOKEN = "ANTHROPIC_AUTH_TOKEN"
+ENV_MODEL = "ANTHROPIC_MODEL"
+ENV_CUSTOM_HEADERS = "ANTHROPIC_CUSTOM_HEADERS"
+RELEVANT_ENV = [ENV_BASE_URL, ENV_API_KEY, ENV_AUTH_TOKEN, ENV_MODEL, ENV_CUSTOM_HEADERS]
+
+
+def _parse_custom_headers(raw: str) -> List[Tuple[str, str]]:
+    """官方格式：`Name: Value`，多个头用换行分隔（已核实，v2.1.227+）。
+    格式不对的行直接跳过，不强行猜——总比塞一个错的进去安全。"""
+    out: List[Tuple[str, str]] = []
+    for line in raw.split("\n"):
+        line = line.strip("\r").strip()
+        if not line or ":" not in line:
+            continue
+        name, _, value = line.partition(":")
+        name, value = name.strip(), value.strip()
+        if name and value:
+            out.append((name, value))
+    return out
+
+
+def _global_path(home: str) -> str:
+    return os.path.join(home, ".claude", "settings.json")
+
+
+def _project_path(project_dir: str) -> str:
+    return os.path.join(project_dir, ".claude", "settings.json")
+
+
+def _read_json_file(layer: str, path: str, known_keys: List[str]) -> FileState:
+    st = FileState(layer=layer, path=path, exists=os.path.exists(path))
+    if not st.exists:
+        return st
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            raw = f.read()
+        st.data = json.loads(raw)
+        if not isinstance(st.data, dict):
+            st.parse_ok = False
+            st.parse_error = "配置文件的最外层应该是一个对象（大括号包起来的结构）"
+            st.data = {}
+    except json.JSONDecodeError as exc:
+        st.parse_ok = False
+        st.parse_error = (
+            f"JSON 格式错误：第 {exc.lineno} 行第 {exc.colno} 列 {exc.msg}。"
+            "格式错误会导致整个文件解析失败，这一层的配置全部不生效，不只是出错的那一处。"
+        )
+        st.data = {}
+    except OSError as exc:
+        st.parse_ok = False
+        st.parse_error = f"读取失败：{exc}"
+    if st.parse_ok and known_keys:
+        st.unknown_keys = [k for k in st.data.keys() if k not in known_keys]
+    return st
+
+
+class ClaudeCodeAdapter(HarnessAdapter):
+    harness_id = "claude_code"
+    display_name = "Claude Code CLI"
+    config_format = "json"
+
+    def detect(self, env=None, home=None, project_dir=None) -> bool:
+        env = env if env is not None else os.environ
+        home = resolve_home(home, env)
+        project_dir = resolve_project_dir(project_dir)
+        if any(env.get(k) for k in RELEVANT_ENV):
+            return True
+        if os.path.isdir(os.path.join(home, ".claude")):
+            return True
+        return os.path.exists(_project_path(project_dir))
+
+    def read(self, env=None, home=None, project_dir=None, known_keys=None,
+              accepted_headers=None) -> HarnessConfig:
+        env = env if env is not None else os.environ
+        home = resolve_home(home, env)
+        project_dir = resolve_project_dir(project_dir)
+        known_keys = known_keys or []
+        accepted_headers = accepted_headers or []
+        accepted_lower = {h.lower() for h in accepted_headers}
+
+        g = _read_json_file("全局配置", _global_path(home), known_keys)
+        p = _read_json_file("项目级配置", _project_path(project_dir), known_keys)
+        cfg = HarnessConfig(harness_id=self.harness_id, display_name=self.display_name,
+                            files=[g, p])
+
+        def env_block(fs: FileState) -> Dict[str, Any]:
+            block = fs.data.get("env")
+            return block if isinstance(block, dict) else {}
+
+        def layers_for(var: str) -> List[LayerValue]:
+            # 优先级从高到低：环境变量 > 项目级 > 全局
+            out = []
+            if env.get(var):
+                out.append(LayerValue("环境变量", "", str(env[var])))
+            for fs in (p, g):
+                v = env_block(fs).get(var)
+                if v:
+                    out.append(LayerValue(fs.layer, fs.path, str(v)))
+            return out
+
+        cfg.fields[FIELD_BASE_URL] = build_resolved(FIELD_BASE_URL, layers_for(ENV_BASE_URL))
+        cfg.fields[FIELD_MODEL] = build_resolved(FIELD_MODEL, layers_for(ENV_MODEL))
+
+        api_key = build_resolved("api_key", layers_for(ENV_API_KEY))
+        auth_token = build_resolved("auth_token", layers_for(ENV_AUTH_TOKEN))
+
+        # 客户端实际发哪个请求头，取决于用户设置的是哪个变量，
+        # 而不是网关“希望”收到哪个头。两个都设置时 API_KEY 优先。
+        if api_key.is_set:
+            auth = api_key
+            cfg.auth_header = "x-api-key"
+        elif auth_token.is_set:
+            auth = auth_token
+            cfg.auth_header = "Authorization"
+        else:
+            auth = api_key
+            cfg.auth_header = "x-api-key"
+        auth.key = FIELD_AUTH
+        cfg.fields[FIELD_AUTH] = auth
+
+        if api_key.is_set and auth_token.is_set:
+            cfg.auth_conflict = (
+                f"{ENV_API_KEY} 和 {ENV_AUTH_TOKEN} 两处都填了鉴权信息，"
+                f"实际生效的是 {ENV_API_KEY}（走 x-api-key 请求头）。"
+            )
+
+        # ANTHROPIC_CUSTOM_HEADERS 是跟 API_KEY/AUTH_TOKEN 平行的另一条鉴权通路：
+        # 客户端会把这里面的头原样跟着请求一起发出去，不会因为设置了它就不发
+        # x-api-key/Authorization。只挑出网关认的那几个头名，避免把无关的自定义头
+        # 误判成鉴权信息。
+        custom_headers = build_resolved("custom_headers", layers_for(ENV_CUSTOM_HEADERS))
+        if custom_headers.is_set:
+            for name, value in _parse_custom_headers(custom_headers.value):
+                if name.lower() in accepted_lower:
+                    cfg.extra_auth_headers.append(ExtraAuthHeader(
+                        header=name, value=value,
+                        source=f"{ENV_CUSTOM_HEADERS}（{custom_headers.source_layer}）"))
+
+        return cfg
+
+    def writable_paths(self, cfg: HarnessConfig) -> List[str]:
+        return [fs.path for fs in cfg.files]
+
+    def _target_file(self, cfg: HarnessConfig) -> FileState:
+        """写到实际生效的那一层。按已确认的使用规范，项目级不应该覆盖全局，
+        所以统一写回全局配置；只有当项目级已经存在配置时才写项目级，
+        避免写了一层不生效的。"""
+        project = next((f for f in cfg.files if f.layer == "项目级配置"), None)
+        if project is not None and project.exists and project.parse_ok:
+            return project
+        return next(f for f in cfg.files if f.layer == "全局配置")
+
+    def apply(self, cfg: HarnessConfig, changes: Dict[str, str],
+              env=None, home=None, project_dir=None) -> List[str]:
+        target = self._target_file(cfg)
+        data = dict(target.data) if target.parse_ok else {}
+        block = dict(data.get("env") or {}) if isinstance(data.get("env"), dict) else {}
+
+        described: List[str] = []
+        for logical, value in changes.items():
+            if logical == FIELD_BASE_URL:
+                block[ENV_BASE_URL] = value
+                described.append(f"网关地址 → {value}（写入{target.layer}）")
+            elif logical == FIELD_MODEL:
+                block[ENV_MODEL] = value
+                described.append(f"模型名称 → {value}（写入{target.layer}）")
+            elif logical == FIELD_AUTH:
+                block[ENV_API_KEY] = value
+                block.pop(ENV_AUTH_TOKEN, None)
+                described.append(f"鉴权信息 → 统一填到 {ENV_API_KEY}（写入{target.layer}）")
+
+        data["env"] = block
+        os.makedirs(os.path.dirname(target.path), exist_ok=True)
+        with open(target.path, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+            f.write("\n")
+        return described
+
+    def generate_minimal_config(self, base_url: str, model: str,
+                                env=None, home=None, project_dir=None) -> str:
+        env = env if env is not None else os.environ
+        home = resolve_home(home, env)
+        path = _global_path(home)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        data = {
+            "env": {
+                ENV_BASE_URL: base_url,
+                ENV_API_KEY: "把这里换成网关后台生成的 Key",
+                ENV_MODEL: model,
+            }
+        }
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+            f.write("\n")
+        return path

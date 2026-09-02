@@ -1,0 +1,173 @@
+"""适配器接口与三个 harness 共用的数据结构。
+
+检测层只认这里定义的结构，不认任何一个 harness 的原始字段名——这样
+checks.py 才能保持与 harness 无关，不必为每个 harness 写一套判断。
+"""
+from __future__ import annotations
+
+import os
+from dataclasses import dataclass, field
+from typing import Any, Dict, List, Optional
+
+# 三个逻辑字段。各 harness 把自己的原始字段名映射到这三个上。
+FIELD_BASE_URL = "base_url"
+FIELD_AUTH = "auth"
+FIELD_MODEL = "model"
+LOGICAL_FIELDS = [FIELD_BASE_URL, FIELD_AUTH, FIELD_MODEL]
+
+
+@dataclass
+class LayerValue:
+    """某一层配置里这个字段的取值。"""
+    layer: str          # 层的名字，比如 "环境变量" / "项目级配置"
+    path: str           # 来源文件路径；环境变量层为空字符串
+    value: str
+    effective: bool = False   # 是不是实际生效的那一层
+
+
+@dataclass
+class FileState:
+    """一个配置文件的读取结果。"""
+    layer: str
+    path: str
+    exists: bool
+    parse_ok: bool = True
+    parse_error: str = ""
+    data: Dict[str, Any] = field(default_factory=dict)
+    unknown_keys: List[str] = field(default_factory=list)
+    active: bool = True       # 这一层是否真的会被 harness 采纳（Codex 的可信项目机制会让它变成 False）
+    inactive_reason: str = ""
+
+
+@dataclass
+class ResolvedField:
+    """一个逻辑字段跨所有层解析后的结果。"""
+    key: str
+    value: Optional[str]
+    source_layer: str = ""
+    source_path: str = ""
+    layers: List[LayerValue] = field(default_factory=list)
+
+    @property
+    def is_set(self) -> bool:
+        return bool(self.value)
+
+    def differing_layers(self) -> List[LayerValue]:
+        """取值与生效值不同的其它层。用于「多层配置取值不一致」这条检测。"""
+        if not self.value:
+            return []
+        return [lv for lv in self.layers if not lv.effective and lv.value != self.value]
+
+
+@dataclass
+class ExtraAuthHeader:
+    """通过跟主鉴权字段平行的另一种机制（比如自定义请求头环境变量）
+    额外发现的、同样可能承载鉴权的请求头。
+
+    这跟 FIELD_AUTH 解析出来的主字段不是替代关系：真实客户端两个都会发，
+    Suture 不应该替用户决定网关到底认哪一个——探活/真实请求要把两者都带上，
+    检测层则要如实提示"这里同时有两个来源在生效"。"""
+    header: str        # 请求头名字，比如 "Token"
+    value: str
+    source: str         # 从哪个变量/文件来的，展示用，比如 "ANTHROPIC_CUSTOM_HEADERS"
+
+
+@dataclass
+class HarnessConfig:
+    """一个 harness 体检所需的全部输入。"""
+    harness_id: str
+    display_name: str
+    fields: Dict[str, ResolvedField] = field(default_factory=dict)
+    files: List[FileState] = field(default_factory=list)
+
+    # 鉴权的两种结构：直接存值，或者存一个环境变量名（间接引用）
+    auth_is_indirect: bool = False
+    auth_env_name: Optional[str] = None       # 间接引用时，配置里写的那个变量名
+    auth_env_resolved: bool = False           # 那个变量名对应的环境变量是否取到了值
+    auth_header: str = "x-api-key"            # 这个客户端实际会发哪个请求头
+    auth_conflict: Optional[str] = None       # 两处同时填了鉴权信息时的说明
+    extra_auth_headers: List[ExtraAuthHeader] = field(default_factory=list)
+
+    # DeepSeek Harness 的模型是一份注册清单而不是单个选中值，单独放在这里，
+    # 每一项都要对着网关路由表校验。另外两个 harness 这里为空。
+    model_candidates: List[str] = field(default_factory=list)
+
+    notes: List[str] = field(default_factory=list)   # 仅供参考的信息，不是错误
+
+    @property
+    def has_any_config(self) -> bool:
+        if any(f.is_set for f in self.fields.values()):
+            return True
+        return any(f.exists for f in self.files)
+
+    def field(self, key: str) -> ResolvedField:
+        return self.fields.get(key, ResolvedField(key=key, value=None))
+
+
+class HarnessAdapter:
+    """所有 harness 适配器的接口。"""
+
+    harness_id: str = ""
+    display_name: str = ""
+    config_format: str = ""      # "json" / "toml" / "yaml"，用于语法检测的措辞
+
+    # ---- 探测 ----
+    def detect(self, env=None, home=None, project_dir=None) -> bool:
+        """本机是否装了/配置过这个 harness。"""
+        raise NotImplementedError
+
+    # ---- 读取 ----
+    def read(self, env=None, home=None, project_dir=None) -> HarnessConfig:
+        raise NotImplementedError
+
+    # ---- 写入 ----
+    def writable_paths(self, cfg: HarnessConfig) -> List[str]:
+        """修复时可能会改到的文件，修复前要先备份这些。"""
+        raise NotImplementedError
+
+    def apply(self, cfg: HarnessConfig, changes: Dict[str, str],
+              env=None, home=None, project_dir=None) -> List[str]:
+        """把 {逻辑字段: 新值} 写回配置。返回给用户看的改动说明。"""
+        raise NotImplementedError
+
+    def generate_minimal_config(self, base_url: str, model: str,
+                                env=None, home=None, project_dir=None) -> str:
+        """全新用户从零生成一份最小可用配置，返回写入的文件路径。"""
+        raise NotImplementedError
+
+
+# ---- 各适配器共用的小工具 ----
+
+def resolve_home(home: Optional[str], env: Optional[Dict[str, str]] = None) -> str:
+    if home:
+        return home
+    env = env if env is not None else os.environ
+    return env.get("HOME") or env.get("USERPROFILE") or os.path.expanduser("~")
+
+
+def resolve_project_dir(project_dir: Optional[str]) -> str:
+    return project_dir or os.getcwd()
+
+
+def build_resolved(key: str, layers_in_priority_order: List[LayerValue]) -> ResolvedField:
+    """按优先级从高到低传入各层取值，产出解析结果。"""
+    rf = ResolvedField(key=key, value=None)
+    for lv in layers_in_priority_order:
+        if lv.value:
+            rf.layers.append(lv)
+    for lv in rf.layers:
+        if rf.value is None:
+            rf.value = lv.value
+            rf.source_layer = lv.layer
+            rf.source_path = lv.path
+            lv.effective = True
+    return rf
+
+
+def mask_secret(value: Optional[str]) -> str:
+    """展示 Key 时只露前 4 位和后 4 位。界面和日志里任何位置都必须走这里。"""
+    if not value:
+        return ""
+    if len(value) <= 8:
+        return "*" * len(value)
+    return f"{value[:4]}{'*' * max(4, len(value) - 8)}{value[-4:]}"
