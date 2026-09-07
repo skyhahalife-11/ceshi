@@ -375,8 +375,15 @@ class Engine:
         # 零配置直连：本机没有任何网关地址/Key，但至少一个 harness 检测到原生登录/
         # 已有可用凭据——这时候拿空鉴权头去打真实网关必然是 401，那不代表配置有
         # 问题，只是没什么好探的，探了反而会把一个正常状态渲染成吓人的错误横幅。
+        # override_base_url 不能直接拿「有没有值」判断是不是用户主动要探——确认卡片
+        # 上那个输入框本来就总是预填了网关规则里那个正确地址（/api/probe_defaults），
+        # 用户什么都没改、原样提交上来的也是这个值，不能当成「用户特意要测这个地址」。
+        # 真正算得上主动要探的，是填了一个跟规则不一样的地址，或者填了 override_key。
+        canonical_base_url = expected_base_url(self.profile, "claude_code")
+        meaningful_override = bool(override_key) or bool(
+            override_base_url and override_base_url.rstrip("/") != canonical_base_url.rstrip("/"))
         skip_probe = (
-            not override_base_url and not override_key and probe_cfg is None
+            not meaningful_override and probe_cfg is None
             and self._any_known_key() is None
             and any(c.native_login for c in configs)
         )
