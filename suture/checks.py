@@ -146,11 +146,14 @@ def check_base_url(cfg: HarnessConfig, profile: Dict[str, Any]) -> Finding:
         return Finding(key="base_url", label=label, ok=True,
                        detail="地址和格式都正确。", current_value=value)
 
+    note = f"当前生效的是{rf.source_layer}里的值"
+    if rf.source_layer == "环境变量":
+        note += "；修复会改写持久化的环境变量本身，已经打开的终端/客户端需要重新打开才会生效"
     return Finding(key="base_url", label=label, ok=False,
                    detail="；".join(problems) + "。",
                    current_value=value, suggested_value=normalized,
                    fixable=FIXABLE_YES, fix_field=FIELD_BASE_URL, fix_value=normalized,
-                   note=f"当前生效的是{rf.source_layer}里的值")
+                   note=note)
 
 
 # ---------- 鉴权 ----------
@@ -309,6 +312,7 @@ def check_models(cfg: HarnessConfig, profile: Dict[str, Any]) -> List[Finding]:
     index = model_index(profile)
     candidates = cfg.model_candidates or (
         [cfg.field(FIELD_MODEL).value] if cfg.field(FIELD_MODEL).is_set else [])
+    source_layer = cfg.field(FIELD_MODEL).source_layer
 
     if not candidates:
         return [Finding(
@@ -322,7 +326,7 @@ def check_models(cfg: HarnessConfig, profile: Dict[str, Any]) -> List[Finding]:
 
     out: List[Finding] = []
     for i, name in enumerate(candidates):
-        out.append(_check_one_model(name, known, index, candidates, i))
+        out.append(_check_one_model(name, known, index, candidates, i, source_layer))
     return out
 
 
@@ -341,8 +345,10 @@ def _replaced_list(candidates: List[str], position: int, new_value: str) -> str:
 
 
 def _check_one_model(name: str, known: List[str], index: Dict[str, Any],
-                     candidates: List[str], position: int) -> Finding:
+                     candidates: List[str], position: int, source_layer: str = "") -> Finding:
     label = "模型名称"
+    env_hint = "；这个字段目前是被环境变量顶着生效的，修复会改写持久化的环境变量本身，" \
+               "已经打开的终端/客户端需要重新打开才会生效" if source_layer == "环境变量" else ""
     if name in index:
         return Finding(key=f"model:{name}", label=label, ok=True,
                        detail=f"「{name}」在网关路由表里能精确匹配。", current_value=name)
@@ -357,7 +363,8 @@ def _check_one_model(name: str, known: List[str], index: Dict[str, Any],
             detail=f"「{name}」和网关登记的「{target}」只差大小写或连字符写法。",
             current_value=name, suggested_value=target,
             fixable=FIXABLE_YES, fix_field=FIELD_MODEL,
-            fix_value=_replaced_list(candidates, position, target))
+            fix_value=_replaced_list(candidates, position, target),
+            note=env_hint.lstrip("；") if env_hint else "")
 
     # 近似匹配的结果如果本身也是一个独立型号，不能自动选——那会让用户在
     # 不知情的情况下连到另一个真实存在的模型，比直接报错更危险。
@@ -367,7 +374,7 @@ def _check_one_model(name: str, known: List[str], index: Dict[str, Any],
             key=f"model:{name}", label=label, ok=False,
             detail=f"「{name}」不在网关路由表里。相近的有：{'、'.join(near)}——"
                    "这些都是各自独立的型号，不是拼写变体，需要你自己确认要用哪一个，"
-                   "自动改会有连错模型的风险。",
+                   f"自动改会有连错模型的风险{env_hint}。",
             current_value=name, suggested_value="、".join(near),
             fixable=FIXABLE_NO, fix_field=FIELD_MODEL,
             choices=[{"label": c, "value": _replaced_list(candidates, position, c)}
@@ -375,7 +382,7 @@ def _check_one_model(name: str, known: List[str], index: Dict[str, Any],
 
     return Finding(
         key=f"model:{name}", label=label, ok=False,
-        detail=f"「{name}」不在网关路由表里，也没有相近的名字。",
+        detail=f"「{name}」不在网关路由表里，也没有相近的名字{env_hint}。",
         current_value=name, fixable=FIXABLE_NO, fix_field=FIELD_MODEL,
         choices=[{"label": m, "value": _replaced_list(candidates, position, m)}
                 for m in known],

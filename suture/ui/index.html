@@ -73,11 +73,6 @@
   .btn-primary:not(:disabled):hover { background: var(--accent-hover); }
   .btn-secondary { background: transparent; color: var(--ink); border-color: var(--border); }
   .btn-secondary:not(:disabled):hover { background: var(--surface-alt); }
-  .btn-choice {
-    background: var(--accent-soft); color: var(--accent-hover);
-    border-color: var(--accent-soft); padding: 6px 14px; font-size: 0.86rem;
-  }
-  .btn-choice:not(:disabled):hover { background: var(--accent); color: #fff; }
   button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
   .actions { display: flex; gap: 10px; flex-wrap: wrap; margin-bottom: 24px; }
 
@@ -123,6 +118,32 @@
   .result.bad { border-color: var(--danger); background: var(--danger-soft); }
   .foot { color: var(--ink-muted); font-size: 0.8rem; margin-top: 28px; }
   .hidden { display: none !important; }
+
+  .field { margin-bottom: 14px; }
+  .field:last-child { margin-bottom: 0; }
+  .field label { display: block; font-weight: 600; font-size: 0.86rem; margin-bottom: 6px; }
+  .input-text {
+    width: 100%; font: inherit; font-family: var(--font-mono); font-size: 0.86rem;
+    padding: 8px 12px; border-radius: var(--radius-ctl); border: 1px solid var(--border);
+    background: var(--surface-alt); color: var(--ink);
+  }
+  .input-text:focus { outline: 2px solid var(--accent); outline-offset: 1px; border-color: var(--accent); }
+  .input-text::placeholder { color: var(--ink-muted); }
+  .card .actions { margin: 16px 0 0; }
+
+  .choice-list {
+    margin-top: 8px; max-height: 220px; overflow-y: auto;
+    border: 1px solid var(--border); border-radius: var(--radius-ctl);
+  }
+  .choice-item {
+    display: block; width: 100%; text-align: left; background: transparent;
+    border: none; border-top: 1px solid var(--border); border-radius: 0;
+    padding: 10px 14px; font: inherit; font-size: 0.88rem; color: var(--ink);
+    cursor: pointer;
+  }
+  .choice-item:first-child { border-top: none; }
+  .choice-item:not(:disabled):hover { background: var(--accent-soft); color: var(--accent-hover); }
+  .choice-item:disabled { opacity: .5; cursor: default; }
 </style>
 </head>
 <body>
@@ -132,17 +153,29 @@
     <p class="sub" id="sub">AI Gate 配置体检与一键修复</p>
   </header>
 
+  <div class="card" id="precheck">
+    <h2>网关连通性自检 · 确认这两项</h2>
+    <div class="field">
+      <label for="baseUrlInput">网关地址</label>
+      <input type="text" id="baseUrlInput" class="input-text" placeholder="检测中…">
+    </div>
+    <div class="field">
+      <label for="apiKeyInput">鉴权 Key</label>
+      <div class="note" id="apiKeyNote">检测中…</div>
+      <input type="text" id="apiKeyInput" class="input-text" placeholder="留空使用上面检测到的 Key，或输入新 Key 覆盖">
+    </div>
+    <div class="actions">
+      <button class="btn-primary" id="btnCheck">开始检查</button>
+      <button class="btn-secondary hidden" id="btnRecheck">重新检查</button>
+    </div>
+  </div>
+
   <div class="statusbar">
     <div class="dot" id="dot"></div>
     <div class="text">
       <div class="title" id="statusTitle">准备就绪</div>
-      <div class="detail" id="statusDetail">点「开始检查」，先测网关是否正常，再检查本机配置。</div>
+      <div class="detail" id="statusDetail">确认上面的网关地址和 Key 后，点「开始检查」。</div>
     </div>
-  </div>
-
-  <div class="actions">
-    <button class="btn-primary" id="btnCheck">开始检查</button>
-    <button class="btn-secondary hidden" id="btnRecheck">重新检查</button>
   </div>
 
   <div id="results"></div>
@@ -199,10 +232,9 @@ function findingRow(f, harnessId, card) {
   // 有候选值、但 Suture 不该替用户挑的场景：摆成一排可以点的选项，
   // 不是自动填、也不是纯文字——点哪个才写哪个。
   if (!f.ok && f.choices && f.choices.length && f.fix_field) {
-    const menu = el("div", "choice-menu");
-    menu.style.cssText = "display:flex;flex-wrap:wrap;gap:8px;margin-top:8px";
+    const menu = el("div", "choice-list");
     f.choices.forEach((c) => {
-      const btn = el("button", "btn-choice", c.label);
+      const btn = el("button", "choice-item", c.label);
       btn.type = "button";
       btn.onclick = () => applyChoice(harnessId, f.fix_field, c.value, btn, menu, card);
       menu.appendChild(btn);
@@ -337,7 +369,11 @@ async function check() {
   $("results").innerHTML = "";
   setStatus("busy", "正在检查", "阶段一：测试网关连通性…");
   try {
-    const report = await api("/api/check", {});
+    const body = {
+      override_base_url: $("baseUrlInput").value.trim(),
+      override_key: $("apiKeyInput").value.trim(),
+    };
+    const report = await api("/api/check", body);
     const p = report.gateway_probe;
     if (report.result === "no_harness") {
       setStatus("warn", "没有探测到支持的客户端", report.message);
@@ -349,12 +385,12 @@ async function check() {
       return;
     }
     const summary = {
-      healthy: ["ok", "检查通过"],
-      issues: ["warn", "发现可修复的问题"],
-      manual: ["warn", "需要人工处理"],
-      no_config: ["warn", "还没配置过"],
-    }[report.result] || ["warn", "检查完成"];
-    setStatus(summary[0], summary[1],
+      healthy: "ok",
+      issues: "warn",
+      manual: "warn",
+      no_config: "warn",
+    }[report.result] || "warn";
+    setStatus(summary, "检查完成",
       `网关自检：${p.detail}（${p.elapsed_ms}ms）${report.message ? " · " + report.message : ""}`);
     report.harnesses.forEach((h) => $("results").appendChild(harnessCard(h)));
     $("btnRecheck").classList.remove("hidden");
@@ -373,6 +409,15 @@ api("/api/state").then((s) => {
     `${s.gateway_name} 配置体检 · 已探测到 ${s.installed.map((i) => i.name).join("、") || "无支持的客户端"}`;
   $("foot").textContent = `规则来源：${s.profile_source} · 网关当前接入 ${s.model_count} 个型号`;
 }).catch(() => {});
+
+api("/api/probe_defaults").then((d) => {
+  $("baseUrlInput").value = d.base_url || "";
+  $("apiKeyNote").textContent = d.has_key
+    ? `检测到：${d.api_key_masked}（来自${d.api_key_source || "配置"}，可信但不一定是这次真正要用的——不确定就在下面填一个新的）`
+    : "没有检测到任何 Key，请直接在下面填写。";
+}).catch((e) => {
+  $("apiKeyNote").textContent = "读取检测值失败：" + e.message;
+});
 </script>
 </body>
 </html>

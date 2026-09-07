@@ -135,6 +135,28 @@ class HarnessAdapter:
         """全新用户从零生成一份最小可用配置，返回写入的文件路径。"""
         raise NotImplementedError
 
+    # ---- 持久化环境变量 ----
+    # 只有像 Claude Code CLI 这种「环境变量优先于配置文件」的 harness 才需要实现这三个；
+    # 默认当作没有这一层——Codex/DeepSeek 的 base_url/model 从不来自环境变量，用默认值即可，
+    # 不需要每个适配器都写一遍空实现。
+    def env_var_targets(self, cfg: HarnessConfig, changes: Dict[str, str]) -> Dict[str, str]:
+        """给定这次要写的 {逻辑字段: 新值}，挑出其中「当前实际生效层就是环境变量」的那些，
+        映射成 {环境变量名: 新值}。这是一次纯读取、不做任何修改的预览，
+        用来在真正写之前决定该备份哪些环境变量、真正写的时候该改哪一层。"""
+        return {}
+
+    def read_persistent_env(self, name: str) -> Optional[str]:
+        """读取某个环境变量当前持久化存储（注册表/shell 配置）里的值，
+        不是当前进程的 os.environ 快照——同一个已经在运行的进程改了环境变量后，
+        os.environ 不会自动刷新，验证修复是否生效必须靠这个读到最新值。"""
+        return None
+
+    def write_persistent_env(self, name: str, value: str) -> None:
+        raise NotImplementedError
+
+    def unset_persistent_env(self, name: str) -> None:
+        raise NotImplementedError
+
 
 # ---- 各适配器共用的小工具 ----
 

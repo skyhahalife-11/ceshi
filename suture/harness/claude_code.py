@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 from typing import Any, Dict, List, Optional, Tuple
 
 from .base import (
@@ -27,6 +28,67 @@ ENV_AUTH_TOKEN = "ANTHROPIC_AUTH_TOKEN"
 ENV_MODEL = "ANTHROPIC_MODEL"
 ENV_CUSTOM_HEADERS = "ANTHROPIC_CUSTOM_HEADERS"
 RELEVANT_ENV = [ENV_BASE_URL, ENV_API_KEY, ENV_AUTH_TOKEN, ENV_MODEL, ENV_CUSTOM_HEADERS]
+
+ENV_LABELS = {ENV_BASE_URL: "网关地址", ENV_MODEL: "模型名称", ENV_API_KEY: "鉴权信息"}
+
+
+# ---- 持久化环境变量（Windows 注册表 HKCU\Environment）----
+# 这一层跟 os.environ 是两件不同的事：os.environ 是进程启动时的快照，改注册表
+# 不会让已经在运行的进程感知到；这里的三个函数专门操作持久化存储本身，
+# 不经过 os.environ，这样「验证刚写的值是否生效」才能拿到真实的最新值。
+
+def _env_registry_root():
+    import winreg  # noqa: PLC0415 —— 只有 Windows 有这个模块，延迟导入
+    return winreg.HKEY_CURRENT_USER, "Environment"
+
+
+def _broadcast_env_change() -> None:
+    """写完注册表后广播一下，让 Explorer 之后派生的新进程能感知到；
+    已经在运行的终端/程序感知不到，这个广播解决不了那部分，只能提示用户重开。"""
+    try:
+        import ctypes  # noqa: PLC0415
+        HWND_BROADCAST, WM_SETTINGCHANGE, SMTO_ABORTIFHUNG = 0xFFFF, 0x1A, 0x0002
+        ctypes.windll.user32.SendMessageTimeoutW(
+            HWND_BROADCAST, WM_SETTINGCHANGE, 0, "Environment",
+            SMTO_ABORTIFHUNG, 5000, None)
+    except Exception:
+        pass
+
+
+def _read_persistent_env(name: str) -> Optional[str]:
+    if sys.platform != "win32":
+        return None
+    import winreg  # noqa: PLC0415
+    try:
+        hive, sub = _env_registry_root()
+        with winreg.OpenKey(hive, sub) as key:
+            value, _ = winreg.QueryValueEx(key, name)
+            return value
+    except (FileNotFoundError, OSError):
+        return None
+
+
+def _write_persistent_env(name: str, value: str) -> None:
+    if sys.platform != "win32":
+        raise RuntimeError("持久化环境变量目前只实现了 Windows（注册表）这一种。")
+    import winreg  # noqa: PLC0415
+    hive, sub = _env_registry_root()
+    with winreg.OpenKey(hive, sub, 0, winreg.KEY_SET_VALUE) as key:
+        winreg.SetValueEx(key, name, 0, winreg.REG_SZ, value)
+    _broadcast_env_change()
+
+
+def _unset_persistent_env(name: str) -> None:
+    if sys.platform != "win32":
+        raise RuntimeError("持久化环境变量目前只实现了 Windows（注册表）这一种。")
+    import winreg  # noqa: PLC0415
+    hive, sub = _env_registry_root()
+    try:
+        with winreg.OpenKey(hive, sub, 0, winreg.KEY_SET_VALUE) as key:
+            winreg.DeleteValue(key, name)
+    except (FileNotFoundError, OSError):
+        pass
+    _broadcast_env_change()
 
 
 def _parse_custom_headers(raw: str) -> List[Tuple[str, str]]:
@@ -166,6 +228,31 @@ class ClaudeCodeAdapter(HarnessAdapter):
     def writable_paths(self, cfg: HarnessConfig) -> List[str]:
         return [fs.path for fs in cfg.files]
 
+    # ---- 持久化环境变量：只有这个字段「当前实际生效层就是环境变量」时才走这条路，
+    # 否则维持原来写 settings.json 的行为。上面 read() 里已经把每个字段解析到
+    # 底是哪一层生效（rf.source_layer）算清楚了，这里直接复用，不用重新判断一遍。
+    FIELD_TO_ENV = {FIELD_BASE_URL: ENV_BASE_URL, FIELD_MODEL: ENV_MODEL, FIELD_AUTH: ENV_API_KEY}
+
+    def env_var_targets(self, cfg: HarnessConfig, changes: Dict[str, str]) -> Dict[str, str]:
+        out: Dict[str, str] = {}
+        for logical, value in changes.items():
+            env_name = self.FIELD_TO_ENV.get(logical)
+            if not env_name:
+                continue
+            rf = cfg.fields.get(logical)
+            if rf is not None and rf.source_layer == "环境变量":
+                out[env_name] = value
+        return out
+
+    def read_persistent_env(self, name: str) -> Optional[str]:
+        return _read_persistent_env(name)
+
+    def write_persistent_env(self, name: str, value: str) -> None:
+        _write_persistent_env(name, value)
+
+    def unset_persistent_env(self, name: str) -> None:
+        _unset_persistent_env(name)
+
     def _target_file(self, cfg: HarnessConfig) -> FileState:
         """写到实际生效的那一层。按已确认的使用规范，项目级不应该覆盖全局，
         所以统一写回全局配置；只有当项目级已经存在配置时才写项目级，
@@ -177,28 +264,42 @@ class ClaudeCodeAdapter(HarnessAdapter):
 
     def apply(self, cfg: HarnessConfig, changes: Dict[str, str],
               env=None, home=None, project_dir=None) -> List[str]:
-        target = self._target_file(cfg)
-        data = dict(target.data) if target.parse_ok else {}
-        block = dict(data.get("env") or {}) if isinstance(data.get("env"), dict) else {}
+        # 先分流：这次要改的字段里，哪些当前是被环境变量顶着生效的，就该改环境变量
+        # 本身，不能照旧写进 settings.json——写了也不会生效，因为环境变量优先级更高。
+        env_targets = self.env_var_targets(cfg, changes)
+        env_fields = {logical for logical in changes if self.FIELD_TO_ENV.get(logical) in env_targets}
+        file_changes = {k: v for k, v in changes.items() if k not in env_fields}
 
         described: List[str] = []
-        for logical, value in changes.items():
-            if logical == FIELD_BASE_URL:
-                block[ENV_BASE_URL] = value
-                described.append(f"网关地址 → {value}（写入{target.layer}）")
-            elif logical == FIELD_MODEL:
-                block[ENV_MODEL] = value
-                described.append(f"模型名称 → {value}（写入{target.layer}）")
-            elif logical == FIELD_AUTH:
-                block[ENV_API_KEY] = value
-                block.pop(ENV_AUTH_TOKEN, None)
-                described.append(f"鉴权信息 → 统一填到 {ENV_API_KEY}（写入{target.layer}）")
+        for name, value in env_targets.items():
+            self.write_persistent_env(name, value)
+            described.append(
+                f"{ENV_LABELS.get(name, name)} → {value}（当前生效层是环境变量，"
+                f"已写入持久化的环境变量 {name}；已经打开的终端/客户端感知不到，"
+                "需要重新打开才会生效）")
 
-        data["env"] = block
-        os.makedirs(os.path.dirname(target.path), exist_ok=True)
-        with open(target.path, "w", encoding="utf-8") as f:
-            json.dump(data, f, ensure_ascii=False, indent=2)
-            f.write("\n")
+        if file_changes:
+            target = self._target_file(cfg)
+            data = dict(target.data) if target.parse_ok else {}
+            block = dict(data.get("env") or {}) if isinstance(data.get("env"), dict) else {}
+
+            for logical, value in file_changes.items():
+                if logical == FIELD_BASE_URL:
+                    block[ENV_BASE_URL] = value
+                    described.append(f"网关地址 → {value}（写入{target.layer}）")
+                elif logical == FIELD_MODEL:
+                    block[ENV_MODEL] = value
+                    described.append(f"模型名称 → {value}（写入{target.layer}）")
+                elif logical == FIELD_AUTH:
+                    block[ENV_API_KEY] = value
+                    block.pop(ENV_AUTH_TOKEN, None)
+                    described.append(f"鉴权信息 → 统一填到 {ENV_API_KEY}（写入{target.layer}）")
+
+            data["env"] = block
+            os.makedirs(os.path.dirname(target.path), exist_ok=True)
+            with open(target.path, "w", encoding="utf-8") as f:
+                json.dump(data, f, ensure_ascii=False, indent=2)
+                f.write("\n")
         return described
 
     def generate_minimal_config(self, base_url: str, model: str,

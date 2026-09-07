@@ -25,6 +25,10 @@ class BackupEntry:
 class BackupManifest:
     timestamp: str
     entries: List[BackupEntry] = field(default_factory=list)
+    # 持久化环境变量的备份：{变量名: 修复前的值}，None 表示修复前压根没设置过这个变量，
+    # 回滚时要删掉而不是写回一个空字符串。跟 entries（文件）是平行的两套备份，
+    # 因为环境变量不是文件，没法用 shutil.copy2 那一套。
+    env_entries: Dict[str, Optional[str]] = field(default_factory=dict)
     directory: str = ""
 
 
@@ -76,3 +80,27 @@ def rollback(manifest: BackupManifest) -> List[str]:
 def apply_fixes(adapter: HarnessAdapter, cfg: HarnessConfig, changes: Dict[str, str],
                 env=None, home=None, project_dir=None) -> List[str]:
     return adapter.apply(cfg, changes, env=env, home=home, project_dir=project_dir)
+
+
+def backup_env(adapter: HarnessAdapter, cfg: HarnessConfig,
+               changes: Dict[str, str]) -> Dict[str, Optional[str]]:
+    """备份即将被改动的持久化环境变量的当前值。必须在 apply_fixes 之前调用，
+    读到的才是「修复前」的值；调用 adapter.env_var_targets 只是预览要改哪些变量，
+    这一步本身不写任何东西。"""
+    targets = adapter.env_var_targets(cfg, changes)
+    return {name: adapter.read_persistent_env(name) for name in targets}
+
+
+def rollback_env(adapter: HarnessAdapter, env_entries: Dict[str, Optional[str]]) -> List[str]:
+    """回滚持久化环境变量。原来没设置过的（None）删掉，原来有值的写回原值。
+    返回回滚失败的变量名列表，跟 rollback() 对文件的失败上报是同一个约定。"""
+    failed: List[str] = []
+    for name, old_value in env_entries.items():
+        try:
+            if old_value is None:
+                adapter.unset_persistent_env(name)
+            else:
+                adapter.write_persistent_env(name, old_value)
+        except (OSError, RuntimeError):
+            failed.append(name)
+    return failed

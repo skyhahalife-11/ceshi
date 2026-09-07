@@ -117,15 +117,31 @@ class Engine:
         return detect_installed(env=self.env, home=self.home, project_dir=self.project_dir)
 
     # ---- 阶段一 ----
-    def probe(self, cfg: Optional[HarnessConfig] = None) -> gateway.ProbeResult:
+    def probe(self, cfg: Optional[HarnessConfig] = None,
+              override_base_url: Optional[str] = None,
+              override_key: Optional[str] = None) -> gateway.ProbeResult:
         """阶段一要回答的是「网关本身活着吗」，所以探的是规则里那个已知正确的地址，
         而不是用户配置里那个可能填错的地址——否则用户把地址填错时，工具会连不上，
         然后判定成「网关侧问题，不要动本地配置」，而真正该修的恰恰就是这个地址。
-        用户配置里的 Key 会带上：拿它探活能顺带看出 Key 本身是不是有效的。"""
+        用户配置里的 Key 会带上：拿它探活能顺带看出 Key 本身是不是有效的。
+
+        override_key 是用户在探活前自己确认/改写的 Key——用它是因为 Suture 读到的
+        环境变量/配置文件里的值，不一定就是这次真的要跑的那把（比如注册表里的持久化值
+        和当前终端继承的值没同步）。有 override 时完全不用 cfg 里的值，避免两者混着猜。"""
         probe_model = self.profile.get("probe_model")
-        base_url = expected_base_url(self.profile, "claude_code")
+        base_url = override_base_url or expected_base_url(self.profile, "claude_code")
         wire = _wire(self.profile, "claude_code")
-        headers = _auth_headers(cfg, fallback_key=self._any_known_key())
+        if override_key:
+            # 手填的 Key，不知道用户的真实客户端会用哪种请求头带它，
+            # 规则里 accepted_headers 列出的都是网关认的位置，全部带上，
+            # 不用去猜是哪一种——跟 check_auth() 里"网关两个头都认"是同一个道理。
+            accepted = self.profile.get("auth", {}).get("accepted_headers") or ["x-api-key"]
+            headers = {
+                h: (f"Bearer {override_key}" if h == "Authorization" else override_key)
+                for h in accepted
+            }
+        else:
+            headers = _auth_headers(cfg, fallback_key=self._any_known_key())
         return gateway.probe_gateway(base_url, headers, probe_model,
                                      suffix=wire["suffix"], style=wire["style"])
 
@@ -136,6 +152,25 @@ class Engine:
             if value:
                 return value
         return None
+
+    def probe_defaults(self) -> Dict[str, Any]:
+        """给探活前的确认卡片用：地址是规则里那个固定正确值，Key 从已安装的
+        harness 里找一个已配置的——两者都只是「默认填入」，用户改了就按用户的走。"""
+        base_url = expected_base_url(self.profile, "claude_code")
+        key = None
+        key_source = ""
+        for a in self.installed():
+            cfg = self.read_harness(a.harness_id)
+            rf = cfg.field(FIELD_AUTH)
+            if rf.is_set:
+                key, key_source = rf.value, rf.source_layer
+                break
+        return {
+            "base_url": base_url,
+            "has_key": bool(key),
+            "api_key_masked": mask_secret(key) if key else "",
+            "api_key_source": key_source,
+        }
 
     # ---- 阶段二 ----
     def check(self, harness_id: str) -> HarnessReport:
@@ -239,7 +274,14 @@ class Engine:
 
         steps: List[Dict[str, str]] = []
         manifest = fixer.backup_files(adapter.writable_paths(cfg), home=self.home)
+        # 环境变量的备份必须在 apply_fixes 之前做，且是独立于文件备份的另一套，
+        # 因为改的可能根本不是文件——env_var_targets 只在「这个字段现在真的是被
+        # 环境变量顶着生效」时才会非空，大多数情况下这里就是空字典。
+        manifest.env_entries = fixer.backup_env(adapter, cfg, changes)
         self._backups[harness_id] = manifest
+        if manifest.env_entries:
+            steps.append({"step": "backup_env",
+                          "detail": f"已记录 {len(manifest.env_entries)} 个持久化环境变量的原值，用于失败时回滚"})
         steps.append({"step": "backup", "detail": f"已备份原配置到 {manifest.directory}"})
 
         try:
@@ -251,8 +293,22 @@ class Engine:
                     "message": f"写入配置失败：{exc}。原配置没有被改动，备份在 {manifest.directory}。"}
         steps.append({"step": "write", "detail": "；".join(applied) if applied else "没有需要写入的改动"})
 
-        # 用修正后的配置重发真实请求
-        cfg2 = self.read_harness(harness_id)
+        # 用修正后的配置重发真实请求验证。如果刚改的是持久化环境变量，当前进程的
+        # self.env（os.environ 快照）感知不到刚写的新值——必须把 manifest.env_entries
+        # 里涉及的变量换成刚才写入 apply() 时那个持久化存储的实时值，再拿这份「实时
+        # 覆盖后的环境」去重新解析配置，否则永远会读到旧值，把一次成功的修复误判成失败。
+        live_env = dict(self.env)
+        for name in manifest.env_entries:
+            live_value = adapter.read_persistent_env(name)
+            if live_value is not None:
+                live_env[name] = live_value
+            else:
+                live_env.pop(name, None)
+        cfg2 = adapter.read(env=live_env, home=self.home, project_dir=self.project_dir,
+                            known_keys=self.profile.get("known_settings_keys", []),
+                            accepted_headers=self.profile.get("auth", {}).get("accepted_headers", []))
+        self._configs[harness_id] = cfg2
+
         base_url = cfg2.field(FIELD_BASE_URL).value
         model = (cfg2.model_candidates[0] if cfg2.model_candidates
                  else cfg2.field(FIELD_MODEL).value) or self.profile.get("probe_model")
@@ -261,10 +317,15 @@ class Engine:
                                            suffix=wire["suffix"], style=wire["style"])
         steps.append({"step": "verify", "detail": retest.detail})
 
+        restart_note = ("如果当前已经开着这个客户端，或者有其它已经打开的终端，"
+                        "需要重新打开才会看到这次改动——上面这一步验证用的是持久化存储的实时值，"
+                        "不是已经打开的窗口那份旧的环境变量快照。") if manifest.env_entries else \
+                       "如果当前已经开着这个客户端，需要重新打开一下才会生效。"
+
         if retest.ok:
             return {"result": RESULT_FIXED, "applied": applied, "steps": steps,
                     "retest": _probe_dict(retest), "backup_dir": manifest.directory,
-                    "message": "修复成功。如果当前已经开着这个客户端，需要重新打开一下才会生效。"}
+                    "message": f"修复成功。{restart_note}"}
 
         # 重发仍失败：补测网关自检做归因，而不是直接判定修复没生效
         reprobe = self.probe(cfg2)
@@ -276,6 +337,7 @@ class Engine:
                                "这次修复保留，没有回滚。"}
 
         failed = fixer.rollback(manifest)
+        failed += fixer.rollback_env(adapter, manifest.env_entries) if manifest.env_entries else []
         if failed:
             return {"result": RESULT_ROLLED_BACK, "applied": applied, "steps": steps,
                     "retest": _probe_dict(retest), "reprobe": _probe_dict(reprobe),
@@ -288,7 +350,9 @@ class Engine:
                            "已经回滚到修复前的配置，建议联系研发进一步排查。"}
 
     # ---- 完整一轮 ----
-    def run(self, harness_ids: Optional[List[str]] = None) -> Report:
+    def run(self, harness_ids: Optional[List[str]] = None,
+            override_base_url: Optional[str] = None,
+            override_key: Optional[str] = None) -> Report:
         report = Report(profile_source=self.profile_source)
 
         adapters = ([get_adapter(h) for h in harness_ids] if harness_ids else self.installed())
@@ -298,14 +362,15 @@ class Engine:
                               "如果你用的是别的客户端，这一期还没有覆盖。")
             return report
 
-        # 阶段一：用其中一个已配置的 harness 去探活，网关状态对所有 harness 是同一件事
+        # 阶段一：用其中一个已配置的 harness 去探活，网关状态对所有 harness 是同一件事。
+        # override_base_url/override_key 是用户在确认卡片里自己填的，优先级比读到的配置更高。
         probe_cfg = None
         for a in adapters:
             cfg = self.read_harness(a.harness_id)
             if cfg.field(FIELD_BASE_URL).is_set:
                 probe_cfg = cfg
                 break
-        probe = self.probe(probe_cfg)
+        probe = self.probe(probe_cfg, override_base_url=override_base_url, override_key=override_key)
         report.gateway_probe = _probe_dict(probe)
 
         if probe.classification in gateway.GATEWAY_SIDE:

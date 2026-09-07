@@ -82,6 +82,12 @@ class Handler(BaseHTTPRequestHandler):
                               for a in eng.installed()],
             })
             return
+        if path == "/api/probe_defaults":
+            if not self._authorized():
+                self._send_json({"error": "forbidden"}, 403)
+                return
+            self._send_json(self.state.engine.probe_defaults())
+            return
         self._send(404, b"not found", "text/plain; charset=utf-8")
 
     def do_POST(self):
@@ -97,7 +103,11 @@ class Handler(BaseHTTPRequestHandler):
 
         with self.state.lock:
             if path == "/api/check":
-                report = self.state.engine.run(harness_ids=payload.get("harness_ids"))
+                report = self.state.engine.run(
+                    harness_ids=payload.get("harness_ids"),
+                    override_base_url=(payload.get("override_base_url") or "").strip() or None,
+                    override_key=(payload.get("override_key") or "").strip() or None,
+                )
                 self.state.last_report = report
                 self._send_json(E.report_to_dict(report))
                 return
