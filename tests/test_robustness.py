@@ -17,7 +17,7 @@ class TestWriteFailure(unittest.TestCase):
     def test_unwritable_config_is_reported_not_claimed_fixed(self):
         """权限不足写不进去时，必须如实说写入失败，
         不能显示「修复成功」但其实什么都没改。"""
-        if os.geteuid() == 0:
+        if hasattr(os, "geteuid") and os.geteuid() == 0:
             self.skipTest("以 root 运行时文件权限不起作用，这条在普通用户下才有意义")
         with Sandbox() as sb:
             path = cc_settings(sb)

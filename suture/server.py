@@ -8,6 +8,7 @@ from __future__ import annotations
 import json
 import os
 import secrets
+import socketserver
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any, Dict, Optional
@@ -15,6 +16,19 @@ from typing import Any, Dict, Optional
 from . import engine as E
 
 UI_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ui")
+
+
+class _LocalOnlyServer(ThreadingHTTPServer):
+    """HTTPServer.server_bind() 默认会对绑定的地址做一次反向 DNS 查询来算
+    server_name——这个工具只监听 127.0.0.1，从来不需要真实主机名，某些网络
+    环境（尤其是公司 VPN、DNS 出口被挡住的沙盒网络）下这个查询会挂起很久，
+    跳过它，直接用 IP 本身。"""
+
+    def server_bind(self) -> None:
+        socketserver.TCPServer.server_bind(self)
+        host, port = self.server_address[:2]
+        self.server_name = host
+        self.server_port = port
 
 
 class _State:
@@ -147,7 +161,7 @@ class Handler(BaseHTTPRequestHandler):
 def create_server(engine: E.Engine, port: int = 0):
     state = _State(engine)
     handler_cls = type("BoundHandler", (Handler,), {"state": state})
-    httpd = ThreadingHTTPServer(("127.0.0.1", port), handler_cls)
+    httpd = _LocalOnlyServer(("127.0.0.1", port), handler_cls)
     return httpd, state
 
 

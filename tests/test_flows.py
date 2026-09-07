@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 import unittest
 
 from tests.helpers import Sandbox, write_json, write_text
@@ -75,7 +76,8 @@ class TestFixSuccess(unittest.TestCase):
             saved = [os.path.join(backup_dir, n) for n in os.listdir(backup_dir)]
             self.assertTrue(any(open(p, encoding="utf-8").read() == before for p in saved))
             for p in saved:      # 备份里有 Key 明文，权限必须收紧
-                self.assertEqual(oct(os.stat(p).st_mode)[-3:], "600")
+                if sys.platform != "win32":   # Windows 的 st_mode 不映射 POSIX 权限位，这条测不出东西
+                    self.assertEqual(oct(os.stat(p).st_mode)[-3:], "600")
 
 
 class TestGatewayDown(unittest.TestCase):
@@ -180,7 +182,8 @@ class TestFreshUser(unittest.TestCase):
             make_engine(sb).generate_config("deepseek")
             creds = os.path.join(sb.home, ".dsh", ".credentials.yaml")
             self.assertTrue(os.path.exists(creds))
-            self.assertEqual(oct(os.stat(creds).st_mode)[-3:], "600")
+            if sys.platform != "win32":   # Windows 的 st_mode 不映射 POSIX 权限位，这条测不出东西
+                self.assertEqual(oct(os.stat(creds).st_mode)[-3:], "600")
 
 
 class TestMultiHarness(unittest.TestCase):

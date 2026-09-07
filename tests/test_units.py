@@ -199,7 +199,9 @@ class TestCodexAdapter(unittest.TestCase):
 
     def test_trusted_project_layer_wins(self):
         with Sandbox() as sb:
-            self._write_user(sb, extra=f'\n[projects."{sb.project}"]\ntrust_level = "trusted"\n')
+            # 表名用 TOML 字面字符串（单引号）而不是基本字符串：Windows 路径带反斜杠，
+            # 用双引号的话 tomllib 会把它们当成转义序列解析，不是路径本身的样子了。
+            self._write_user(sb, extra=f"\n[projects.'{sb.project}']\ntrust_level = \"trusted\"\n")
             write_text(os.path.join(sb.project, ".codex", "config.toml"), 'model = "kimi-k3"\n')
             cfg = CodexAdapter().read(env=sb.env, home=sb.home, project_dir=sb.project)
             self.assertEqual(cfg.field("model").value, "kimi-k3")
