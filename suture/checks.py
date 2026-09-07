@@ -112,8 +112,7 @@ def check_base_url(cfg: HarnessConfig, profile: Dict[str, Any]) -> Finding:
     if not rf.is_set:
         if cfg.native_login:
             return Finding(key="base_url", label=label, ok=True,
-                           detail="没有配置网关地址——检测到本机已经是零配置直连状态（原生登录/已有可用凭据），"
-                                  "不需要额外配置。")
+                           detail="没有配置网关地址——检测到直连网关，不需要额外配置。")
         return Finding(key="base_url", label=label, ok=False,
                        detail="没有配置网关地址。", suggested_value=expected,
                        fixable=FIXABLE_YES, fix_field=FIELD_BASE_URL, fix_value=expected)
@@ -185,8 +184,7 @@ def check_auth(cfg: HarnessConfig, profile: Dict[str, Any]) -> List[Finding]:
             if cfg.native_login:
                 out.append(Finding(
                     key="auth-ref", label="鉴权引用", ok=True,
-                    detail="配置里没有写明去哪个环境变量取 Key，但检测到本机已经有可用的登录凭据，"
-                           "属于零配置直连状态，不需要额外配置。"))
+                    detail="配置里没有写明去哪个环境变量取 Key，但检测到直连网关，不需要额外配置。"))
             else:
                 out.append(Finding(
                     key="auth-ref", label="鉴权引用", ok=False,
@@ -212,8 +210,7 @@ def check_auth(cfg: HarnessConfig, profile: Dict[str, Any]) -> List[Finding]:
             if cfg.native_login:
                 out.append(Finding(
                     key="auth", label="鉴权信息", ok=True,
-                    detail="没有配置鉴权信息，但检测到本机已经是零配置直连状态（原生登录/已有可用凭据），"
-                           "不需要额外配置。"))
+                    detail="没有配置鉴权信息，但检测到直连网关，不需要额外配置。"))
             else:
                 out.append(Finding(
                     key="auth", label="鉴权信息", ok=False,
@@ -334,8 +331,7 @@ def check_models(cfg: HarnessConfig, profile: Dict[str, Any]) -> List[Finding]:
         if cfg.native_login:
             return [Finding(
                 key="model", label="模型名称", ok=True,
-                detail="没有配置模型名称，但检测到本机已经是零配置直连状态——这种连接方式下用的是"
-                       "客户端自己的默认模型，不受网关型号列表约束。")]
+                detail="没有配置模型名称，但检测到直连网关，不受网关型号列表约束。")]
         return [Finding(
             key="model", label="模型名称", ok=False,
             detail="没有配置模型名称——这跟阶段一探活用的模型是两回事，"

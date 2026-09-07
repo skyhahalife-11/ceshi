@@ -244,8 +244,8 @@ class ClaudeCodeAdapter(HarnessAdapter):
         cfg.native_login = _has_native_login(home)
         if cfg.native_login and not cfg.fields[FIELD_BASE_URL].is_set and not cfg.fields[FIELD_AUTH].is_set:
             cfg.notes.append(
-                "检测到本机已经通过 Claude 订阅（claude login）登录，没有配置网关地址/鉴权信息，"
-                "这是零配置直连的正常状态，不需要额外配置——下面几项检查会按这个状态处理。")
+                "检测到直连网关，没有配置网关地址/鉴权信息，这是正常状态，不需要额外配置"
+                "——下面几项检查会按这个状态处理。")
 
         return cfg
 

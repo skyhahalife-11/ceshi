@@ -170,8 +170,8 @@ class CodexAdapter(HarnessAdapter):
         cfg.native_login = _has_native_login(_auth_json_path(env, home))
         if cfg.native_login and not cfg.fields[FIELD_BASE_URL].is_set and not cfg.fields[FIELD_MODEL].is_set:
             cfg.notes.append(
-                "检测到本机已经有 Codex 登录凭据（ChatGPT 订阅登录或已缓存的 API Key），"
-                "没有配置 model_provider/网关地址，这是零配置直连的正常状态——下面几项检查会按这个状态处理。")
+                "检测到直连网关，没有配置 model_provider/网关地址，这是正常状态"
+                "——下面几项检查会按这个状态处理。")
 
         return cfg
 

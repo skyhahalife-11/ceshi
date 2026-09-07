@@ -383,7 +383,7 @@ class Engine:
         if skip_probe:
             report.gateway_probe = {
                 "ok": True, "classification": "skipped", "status": None,
-                "detail": "检测到零配置直连（原生登录/已有可用凭据），本机没有网关地址/Key 可探测，跳过网关自检。",
+                "detail": "检测到直连网关，本机没有网关地址/Key 可探测，跳过网关自检。",
                 "elapsed_ms": 0,
             }
         else:
