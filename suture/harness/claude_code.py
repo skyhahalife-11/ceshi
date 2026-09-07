@@ -106,6 +106,24 @@ def _parse_custom_headers(raw: str) -> List[Tuple[str, str]]:
     return out
 
 
+def _credentials_path(home: str) -> str:
+    return os.path.join(home, ".claude", ".credentials.json")
+
+
+def _has_native_login(home: str) -> bool:
+    """检测本机是不是已经有一份 Claude 订阅的原生 OAuth 登录会话
+    （`claude login` 生成，跟 ANTHROPIC_API_KEY/BASE_URL 这套网关配置无关）。
+    只看 claudeAiOauth.accessToken 在不在，不解析/使用里面的令牌——
+    这里只是拿来判断「有没有一条完全不经过网关配置的可用连接方式」。"""
+    try:
+        with open(_credentials_path(home), "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except (OSError, json.JSONDecodeError, ValueError):
+        return False
+    oauth = data.get("claudeAiOauth") if isinstance(data, dict) else None
+    return isinstance(oauth, dict) and bool(oauth.get("accessToken"))
+
+
 def _global_path(home: str) -> str:
     return os.path.join(home, ".claude", "settings.json")
 
@@ -222,6 +240,12 @@ class ClaudeCodeAdapter(HarnessAdapter):
                     cfg.extra_auth_headers.append(ExtraAuthHeader(
                         header=name, value=value,
                         source=f"{ENV_CUSTOM_HEADERS}（{custom_headers.source_layer}）"))
+
+        cfg.native_login = _has_native_login(home)
+        if cfg.native_login and not cfg.fields[FIELD_BASE_URL].is_set and not cfg.fields[FIELD_AUTH].is_set:
+            cfg.notes.append(
+                "检测到本机已经通过 Claude 订阅（claude login）登录，没有配置网关地址/鉴权信息，"
+                "这是零配置直连的正常状态，不需要额外配置——下面几项检查会按这个状态处理。")
 
         return cfg
 

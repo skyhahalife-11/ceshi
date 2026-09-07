@@ -92,6 +92,12 @@ class HarnessConfig:
     # 每一项都要对着网关路由表校验。另外两个 harness 这里为空。
     model_candidates: List[str] = field(default_factory=list)
 
+    # 本机是不是已经有一份跟网关无关的原生登录/凭据（比如 Claude 订阅的 OAuth
+    # 会话、Codex 的 ChatGPT 登录或者已缓存的 API Key）——这种情况下完全没配置
+    # 网关地址/Key/模型名称是正常状态，不是「还没配置好」，checks.py 会按这个
+    # 标记决定是报问题还是当成零配置直连处理。
+    native_login: bool = False
+
     notes: List[str] = field(default_factory=list)   # 仅供参考的信息，不是错误
 
     @property

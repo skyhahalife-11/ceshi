@@ -110,6 +110,10 @@ def check_base_url(cfg: HarnessConfig, profile: Dict[str, Any]) -> Finding:
     label = "网关地址"
 
     if not rf.is_set:
+        if cfg.native_login:
+            return Finding(key="base_url", label=label, ok=True,
+                           detail="没有配置网关地址——检测到本机已经是零配置直连状态（原生登录/已有可用凭据），"
+                                  "不需要额外配置。")
         return Finding(key="base_url", label=label, ok=False,
                        detail="没有配置网关地址。", suggested_value=expected,
                        fixable=FIXABLE_YES, fix_field=FIELD_BASE_URL, fix_value=expected)
@@ -178,11 +182,17 @@ def check_auth(cfg: HarnessConfig, profile: Dict[str, Any]) -> List[Finding]:
     # 间接引用的 harness：先看那个变量名本身取不取得到值
     if cfg.auth_is_indirect:
         if not cfg.auth_env_name:
-            out.append(Finding(
-                key="auth-ref", label="鉴权引用", ok=False,
-                detail="配置里没有写明去哪个环境变量取 Key。",
-                suggested_value="AI_GATE_API_KEY",
-                fixable=FIXABLE_YES, fix_field=FIELD_AUTH, fix_value="AI_GATE_API_KEY"))
+            if cfg.native_login:
+                out.append(Finding(
+                    key="auth-ref", label="鉴权引用", ok=True,
+                    detail="配置里没有写明去哪个环境变量取 Key，但检测到本机已经有可用的登录凭据，"
+                           "属于零配置直连状态，不需要额外配置。"))
+            else:
+                out.append(Finding(
+                    key="auth-ref", label="鉴权引用", ok=False,
+                    detail="配置里没有写明去哪个环境变量取 Key。",
+                    suggested_value="AI_GATE_API_KEY",
+                    fixable=FIXABLE_YES, fix_field=FIELD_AUTH, fix_value="AI_GATE_API_KEY"))
         elif not cfg.auth_env_resolved:
             out.append(Finding(
                 key="auth-ref", label="鉴权引用", ok=False,
@@ -199,10 +209,16 @@ def check_auth(cfg: HarnessConfig, profile: Dict[str, Any]) -> List[Finding]:
     has_primary = rf.is_set
     if not has_primary and not extras:
         if not cfg.auth_is_indirect:
-            out.append(Finding(
-                key="auth", label="鉴权信息", ok=False,
-                detail="没有配置鉴权信息，请求会被网关直接拒绝。", fixable=FIXABLE_NO,
-                note="需要去网关后台生成一个 Key"))
+            if cfg.native_login:
+                out.append(Finding(
+                    key="auth", label="鉴权信息", ok=True,
+                    detail="没有配置鉴权信息，但检测到本机已经是零配置直连状态（原生登录/已有可用凭据），"
+                           "不需要额外配置。"))
+            else:
+                out.append(Finding(
+                    key="auth", label="鉴权信息", ok=False,
+                    detail="没有配置鉴权信息，请求会被网关直接拒绝。", fixable=FIXABLE_NO,
+                    note="需要去网关后台生成一个 Key"))
         return out
 
     if has_primary:
@@ -315,6 +331,11 @@ def check_models(cfg: HarnessConfig, profile: Dict[str, Any]) -> List[Finding]:
     source_layer = cfg.field(FIELD_MODEL).source_layer
 
     if not candidates:
+        if cfg.native_login:
+            return [Finding(
+                key="model", label="模型名称", ok=True,
+                detail="没有配置模型名称，但检测到本机已经是零配置直连状态——这种连接方式下用的是"
+                       "客户端自己的默认模型，不受网关型号列表约束。")]
         return [Finding(
             key="model", label="模型名称", ok=False,
             detail="没有配置模型名称——这跟阶段一探活用的模型是两回事，"

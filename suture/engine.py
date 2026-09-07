@@ -365,19 +365,36 @@ class Engine:
         # 阶段一：用其中一个已配置的 harness 去探活，网关状态对所有 harness 是同一件事。
         # override_base_url/override_key 是用户在确认卡片里自己填的，优先级比读到的配置更高。
         probe_cfg = None
+        configs = []
         for a in adapters:
             cfg = self.read_harness(a.harness_id)
-            if cfg.field(FIELD_BASE_URL).is_set:
+            configs.append(cfg)
+            if probe_cfg is None and cfg.field(FIELD_BASE_URL).is_set:
                 probe_cfg = cfg
-                break
-        probe = self.probe(probe_cfg, override_base_url=override_base_url, override_key=override_key)
-        report.gateway_probe = _probe_dict(probe)
 
-        if probe.classification in gateway.GATEWAY_SIDE:
-            report.result = RESULT_GATEWAY_DOWN
-            report.message = ("判定为网关侧问题，不会去动本地配置。建议联系网关值班同学，"
-                              "或者稍后重试。")
-            return report
+        # 零配置直连：本机没有任何网关地址/Key，但至少一个 harness 检测到原生登录/
+        # 已有可用凭据——这时候拿空鉴权头去打真实网关必然是 401，那不代表配置有
+        # 问题，只是没什么好探的，探了反而会把一个正常状态渲染成吓人的错误横幅。
+        skip_probe = (
+            not override_base_url and not override_key and probe_cfg is None
+            and self._any_known_key() is None
+            and any(c.native_login for c in configs)
+        )
+        if skip_probe:
+            report.gateway_probe = {
+                "ok": True, "classification": "skipped", "status": None,
+                "detail": "检测到零配置直连（原生登录/已有可用凭据），本机没有网关地址/Key 可探测，跳过网关自检。",
+                "elapsed_ms": 0,
+            }
+        else:
+            probe = self.probe(probe_cfg, override_base_url=override_base_url, override_key=override_key)
+            report.gateway_probe = _probe_dict(probe)
+
+            if probe.classification in gateway.GATEWAY_SIDE:
+                report.result = RESULT_GATEWAY_DOWN
+                report.message = ("判定为网关侧问题，不会去动本地配置。建议联系网关值班同学，"
+                                  "或者稍后重试。")
+                return report
 
         # 阶段二：逐个 harness 体检，分别出结论，不合并成一份笼统的报告
         for a in adapters:
@@ -393,7 +410,9 @@ class Engine:
             report.message = "发现的问题里没有能自动修复的，需要人工处理。"
         else:
             report.result = RESULT_HEALTHY
-            report.message = "检查全部通过，请求也跑通了。如果还是用不了，问题可能不在客户端配置。"
+            any_e2e = any(h.e2e_results for h in report.harnesses)
+            report.message = ("检查全部通过，请求也跑通了。如果还是用不了，问题可能不在客户端配置。"
+                              if any_e2e else "检查全部通过，没有发现问题。")
         return report
 
 
