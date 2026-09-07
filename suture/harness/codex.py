@@ -147,7 +147,6 @@ class CodexAdapter(HarnessAdapter):
         cfg._provider_id = provider_id
         if provider_id is None and any(f.exists for f in (u, p)):
             cfg.notes.append("配置里没有指定 model_provider，无法确定该看哪个 provider 分块的地址和鉴权设置。")
-
         return cfg
 
     def writable_paths(self, cfg: HarnessConfig) -> List[str]:
