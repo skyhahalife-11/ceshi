@@ -9,7 +9,6 @@
 """
 from __future__ import annotations
 
-import json
 import os
 import re
 import tomllib
@@ -46,24 +45,6 @@ def _read_toml(layer: str, path: str) -> FileState:
         st.parse_ok = False
         st.parse_error = f"读取失败：{exc}"
     return st
-
-
-def _auth_json_path(env: Dict[str, str], home: str) -> str:
-    codex_home = env.get("CODEX_HOME")
-    return os.path.join(codex_home, "auth.json") if codex_home else os.path.join(home, ".codex", "auth.json")
-
-
-def _has_native_login(path: str) -> bool:
-    """检测本机是不是已经有一份 Codex 的登录凭据（`codex login` 的 ChatGPT
-    订阅会话，或者已经缓存好的 OPENAI_API_KEY）——跟 config.toml 里
-    model_provider/env_key 这套网关配置无关，只看这份凭据存不存在，
-    不解析里面的令牌/Key 本身。"""
-    try:
-        with open(path, "r", encoding="utf-8") as f:
-            data = json.load(f)
-    except (OSError, ValueError):
-        return False
-    return isinstance(data, dict) and bool(data.get("OPENAI_API_KEY") or data.get("tokens"))
 
 
 def _project_is_trusted(user_file: FileState, project_dir: str) -> bool:
@@ -166,12 +147,6 @@ class CodexAdapter(HarnessAdapter):
         cfg._provider_id = provider_id
         if provider_id is None and any(f.exists for f in (u, p)):
             cfg.notes.append("配置里没有指定 model_provider，无法确定该看哪个 provider 分块的地址和鉴权设置。")
-
-        cfg.native_login = _has_native_login(_auth_json_path(env, home))
-        if cfg.native_login and not cfg.fields[FIELD_BASE_URL].is_set and not cfg.fields[FIELD_MODEL].is_set:
-            cfg.notes.append(
-                "检测到直连网关，没有配置 model_provider/网关地址，这是正常状态"
-                "——下面几项检查会按这个状态处理。")
 
         return cfg
 

@@ -365,43 +365,19 @@ class Engine:
         # 阶段一：用其中一个已配置的 harness 去探活，网关状态对所有 harness 是同一件事。
         # override_base_url/override_key 是用户在确认卡片里自己填的，优先级比读到的配置更高。
         probe_cfg = None
-        configs = []
         for a in adapters:
             cfg = self.read_harness(a.harness_id)
-            configs.append(cfg)
-            if probe_cfg is None and cfg.field(FIELD_BASE_URL).is_set:
+            if cfg.field(FIELD_BASE_URL).is_set:
                 probe_cfg = cfg
+                break
+        probe = self.probe(probe_cfg, override_base_url=override_base_url, override_key=override_key)
+        report.gateway_probe = _probe_dict(probe)
 
-        # 零配置直连：本机没有任何网关地址/Key，但至少一个 harness 检测到原生登录/
-        # 已有可用凭据——这时候拿空鉴权头去打真实网关必然是 401，那不代表配置有
-        # 问题，只是没什么好探的，探了反而会把一个正常状态渲染成吓人的错误横幅。
-        # override_base_url 不能直接拿「有没有值」判断是不是用户主动要探——确认卡片
-        # 上那个输入框本来就总是预填了网关规则里那个正确地址（/api/probe_defaults），
-        # 用户什么都没改、原样提交上来的也是这个值，不能当成「用户特意要测这个地址」。
-        # 真正算得上主动要探的，是填了一个跟规则不一样的地址，或者填了 override_key。
-        canonical_base_url = expected_base_url(self.profile, "claude_code")
-        meaningful_override = bool(override_key) or bool(
-            override_base_url and override_base_url.rstrip("/") != canonical_base_url.rstrip("/"))
-        skip_probe = (
-            not meaningful_override and probe_cfg is None
-            and self._any_known_key() is None
-            and any(c.native_login for c in configs)
-        )
-        if skip_probe:
-            report.gateway_probe = {
-                "ok": True, "classification": "skipped", "status": None,
-                "detail": "检测到直连网关，本机没有网关地址/Key 可探测，跳过网关自检。",
-                "elapsed_ms": 0,
-            }
-        else:
-            probe = self.probe(probe_cfg, override_base_url=override_base_url, override_key=override_key)
-            report.gateway_probe = _probe_dict(probe)
-
-            if probe.classification in gateway.GATEWAY_SIDE:
-                report.result = RESULT_GATEWAY_DOWN
-                report.message = ("判定为网关侧问题，不会去动本地配置。建议联系网关值班同学，"
-                                  "或者稍后重试。")
-                return report
+        if probe.classification in gateway.GATEWAY_SIDE:
+            report.result = RESULT_GATEWAY_DOWN
+            report.message = ("判定为网关侧问题，不会去动本地配置。建议联系网关值班同学，"
+                              "或者稍后重试。")
+            return report
 
         # 阶段二：逐个 harness 体检，分别出结论，不合并成一份笼统的报告
         for a in adapters:
