@@ -49,17 +49,70 @@ jobs:
       # Windows 不签名会弹 SmartScreen 警告，对一个要读 Key 的工具很难建立信任。
       # 证书就绪后在这里补上 codesign/notarytool 与 signtool 两步。
 
+      - name: 整理成带平台标识的最终产物名
+        shell: bash
+        run: |
+          cd dist
+          case "${{ matrix.target }}" in
+            windows-*)
+              mv suture.exe "suture-${{ matrix.target }}.exe"
+              ;;
+            macos-*)
+              # BUNDLE() 产出的是 Suture.app 目录，压缩成 zip 才能当一个文件分发；
+              # EXE() 那份裸的 Unix 可执行文件只是构建 .app 用的中间产物，不对外发。
+              ditto -c -k --sequesterRsrc --keepParent Suture.app "suture-${{ matrix.target }}.zip"
+              rm -rf Suture.app suture
+              ;;
+            linux-*)
+              mv suture "suture-${{ matrix.target }}"
+              ;;
+          esac
+          ls -la
+
       - name: 计算校验值
         shell: bash
         run: |
           cd dist
-          if command -v shasum >/dev/null; then shasum -a 256 suture* > SHA256SUMS.txt;
-          else sha256sum suture* > SHA256SUMS.txt; fi
+          if command -v shasum >/dev/null; then shasum -a 256 suture-* > SHA256SUMS.txt;
+          else sha256sum suture-* > SHA256SUMS.txt; fi
           cat SHA256SUMS.txt
 
       - uses: actions/upload-artifact@v4
         with:
           name: suture-${{ matrix.target }}
           path: |
-            dist/suture*
+            dist/suture-*
             dist/SHA256SUMS.txt
+
+  # 只有推 v* 的 tag 才会跑：之前六个 job 各自把产物传去 artifact 就算完了，
+  # artifact 需要登录 GitHub 才能下载、有保留期，tag 推送之后实际上什么都没
+  # 发布出去。这一步把六份产物收集起来，合并成一份 Release，才是真的能给
+  # 用户一个下载链接的形态。
+  publish:
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: 下载全部平台产物
+        uses: actions/download-artifact@v4
+        with:
+          pattern: suture-*
+          path: artifacts
+
+      - name: 合并六份校验值，把产物摊平成一个目录
+        shell: bash
+        run: |
+          mkdir -p release
+          for d in artifacts/*/; do
+            find "$d" -maxdepth 1 -type f ! -name 'SHA256SUMS.txt' -exec cp {} release/ \;
+          done
+          cat artifacts/*/SHA256SUMS.txt > release/SHA256SUMS.txt
+          cat release/SHA256SUMS.txt
+
+      - name: 创建 GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: release/*
+          generate_release_notes: true
