@@ -154,11 +154,15 @@ class DeepSeekHarnessAdapter(HarnessAdapter):
 
         cfg.fields[FIELD_BASE_URL] = build_resolved(FIELD_BASE_URL, layers_for("baseURL"))
 
-        # 模型是一份注册清单，不是单个选中值：每一项都要校验
+        # 模型是一份注册清单，不是单个选中值：每一项都要校验。
+        # 层名必须记「清单实际是从哪一层读到的」——用户层有 providers 但没写 models
+        # 时，清单其实来自基线层，标成用户层会让人去改一个根本没有这一项的文件。
         models: List[str] = []
-        for _, rc in ordered:
+        models_layer: Optional[FileState] = None
+        for fs, rc in ordered:
             entries = rc.get("models")
             if isinstance(entries, list):
+                models_layer = fs
                 for item in entries:
                     mid = item.get("id") if isinstance(item, dict) else item
                     if mid and str(mid) not in models:
@@ -167,7 +171,8 @@ class DeepSeekHarnessAdapter(HarnessAdapter):
         cfg.model_candidates = models
         cfg.fields[FIELD_MODEL] = build_resolved(
             FIELD_MODEL,
-            [LayerValue(ordered[0][0].layer if user_providers else base.layer, "", models[0])] if models else [],
+            [LayerValue(models_layer.layer, models_layer.path, models[0])]
+            if models and models_layer is not None else [],
         )
 
         # 鉴权：间接引用 + 四层取值顺序
@@ -175,7 +180,6 @@ class DeepSeekHarnessAdapter(HarnessAdapter):
         cfg.auth_is_indirect = True
         cfg.auth_env_name = env_name_field.value
         cfg.auth_header = "Authorization"
-        cfg._env_key_field = env_name_field
 
         secret, secret_source = None, ""
         if env_name_field.value:

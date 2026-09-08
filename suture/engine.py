@@ -12,7 +12,7 @@ from typing import Any, Dict, List, Optional
 
 from . import fixer, gateway
 from .checks import Finding, FIXABLE_NO, FIXABLE_YES, run_all_checks
-from .harness import ALL_ADAPTERS, detect_installed, get_adapter
+from .harness import detect_installed, get_adapter
 from .harness.base import FIELD_AUTH, FIELD_BASE_URL, FIELD_MODEL, HarnessConfig, mask_secret
 from .profile import expected_base_url, load_profile
 
@@ -92,6 +92,58 @@ def _auth_headers(cfg: Optional[HarnessConfig], fallback_key: Optional[str] = No
 # 端到端结果如果证明「当前这套地址 + 鉴权确实连得通」，这几类静态判断就不该
 # 再说「这是错的」——它们本来就是在没有更强证据时候的猜测。
 _CONNECTIVITY_FINDING_KEYS = {"base_url", "auth", "auth-ref"}
+
+
+# 同一个逻辑字段可能同时有多条修复建议，而它们携带的信息强弱不一样：
+#   「纠正类」（地址不对、Key 带空格）知道正确的值应该是什么；
+#   「归位类」（多层取值不一致、鉴权填在两个变量里）只知道该统一到一处，
+#     它的 fix_value 就是当前生效的那个值——如果当前生效的值本身是错的，
+#     照它写回去等于把错值确认一遍。
+# 所以合并时必须让纠正类赢，不能靠 dict 赋值的先后顺序决定结果。
+_FIX_CLASS_ALIGN = 0        # 归位类：优先级低
+_FIX_CLASS_CORRECT = 1      # 纠正类：优先级高
+_ALIGN_FINDING_PREFIXES = ("conflict:", "auth-conflict")
+
+
+def _fix_class(finding: Finding) -> int:
+    key = finding.key or ""
+    if any(key.startswith(p) for p in _ALIGN_FINDING_PREFIXES):
+        return _FIX_CLASS_ALIGN
+    return _FIX_CLASS_CORRECT
+
+
+def _merge_changes(findings: List[Finding]):
+    """把多条 Finding 收敛成一份 {逻辑字段: 新值}。
+
+    同一字段有多条建议时按上面的优先级取，并如实说明取了哪条、跳过了哪条；
+    同优先级又给出不同的值时，这个字段整体不自动修——Suture 不猜。
+    返回 (changes, 合并说明, 无法判定的说明)。"""
+    by_field: Dict[str, List[Finding]] = {}
+    for f in findings:
+        if f.fixable == FIXABLE_YES and f.fix_field and f.fix_value is not None:
+            by_field.setdefault(f.fix_field, []).append(f)
+
+    changes: Dict[str, str] = {}
+    notes: List[str] = []
+    unresolved: List[str] = []
+    for field, cands in by_field.items():
+        if len(cands) == 1:
+            changes[field] = cands[0].fix_value
+            continue
+        top = max(_fix_class(c) for c in cands)
+        winners = [c for c in cands if _fix_class(c) == top]
+        distinct = {c.fix_value for c in winners}
+        if len(distinct) > 1:
+            desc = "、".join(f"「{c.label}」建议 {c.fix_value}" for c in winners)
+            unresolved.append(f"{field} 有多条同等的修复建议且取值不同（{desc}），本次不自动修改")
+            continue
+        changes[field] = winners[0].fix_value
+        skipped = [c for c in cands if _fix_class(c) != top]
+        if skipped:
+            names = "、".join(f"「{c.label}」" for c in skipped)
+            notes.append(f"{field} 采用「{winners[0].label}」给出的值；{names}只要求统一到一处，"
+                         f"不携带正确值，已跳过其建议值")
+    return changes, notes, unresolved
 
 
 class Engine:
@@ -265,14 +317,30 @@ class Engine:
         adapter = get_adapter(harness_id)
         cfg = self._configs.get(harness_id) or self.read_harness(harness_id)
 
-        changes: Dict[str, str] = {}
-        for f in findings:
-            if f.fixable == FIXABLE_YES and f.fix_field and f.fix_value is not None:
-                changes[f.fix_field] = f.fix_value
+        changes, merge_notes, unresolved = _merge_changes(findings)
         if not changes:
+            if unresolved:
+                return {"result": RESULT_MANUAL, "applied": [], "steps": [],
+                        "message": "；".join(unresolved) + "。需要人工确认该用哪个值。"}
             return {"result": RESULT_MANUAL, "message": "没有可以自动修复的项。", "applied": []}
 
         steps: List[Dict[str, str]] = []
+        for note in merge_notes + unresolved:
+            steps.append({"step": "merge", "detail": note})
+
+        # 改持久化环境变量目前只在 Windows 上实现。别的平台上要在动手之前就发现，
+        # 否则会写到一半抛异常——把该设的变量和值如实列出来，让用户自己去设，
+        # 比抛一个异常有用。
+        env_preview = adapter.env_var_targets(cfg, changes)
+        if env_preview and not adapter.supports_persistent_env():
+            manual = "；".join(
+                f"删掉 {name}" if value is None else f"把 {name} 设成 {value}"
+                for name, value in env_preview.items())
+            return {"result": RESULT_MANUAL, "applied": [], "steps": steps,
+                    "message": f"这几项现在是被环境变量顶着生效的，而当前系统上 Suture "
+                               f"还不能代改持久化环境变量（只实现了 Windows）。"
+                               f"需要手动处理：{manual}。改完重开终端再检查一次。"}
+
         manifest = fixer.backup_files(adapter.writable_paths(cfg), home=self.home)
         # 环境变量的备份必须在 apply_fixes 之前做，且是独立于文件备份的另一套，
         # 因为改的可能根本不是文件——env_var_targets 只在「这个字段现在真的是被
@@ -287,10 +355,17 @@ class Engine:
         try:
             applied = fixer.apply_fixes(adapter, cfg, changes, env=self.env,
                                         home=self.home, project_dir=self.project_dir)
-        except OSError as exc:
-            # 写入失败必须如实上报，不能显示修复成功但其实什么都没改
+        except (OSError, RuntimeError) as exc:
+            # 写入失败必须如实上报，不能显示修复成功但其实什么都没改。
+            # 也不能想当然地说「原配置没被改动」——可能已经写了一部分才失败，
+            # 所以这里真的回滚一遍，回滚本身失败也照实说。
+            failed = fixer.rollback(manifest)
+            if manifest.env_entries:
+                failed += fixer.rollback_env(adapter, manifest.env_entries)
+            restored = ("原配置已恢复" if not failed
+                        else "回滚时有 " + "、".join(failed) + " 没能恢复，需要手动检查")
             return {"result": RESULT_MANUAL, "applied": [], "steps": steps,
-                    "message": f"写入配置失败：{exc}。原配置没有被改动，备份在 {manifest.directory}。"}
+                    "message": f"写入配置失败：{exc}。{restored}，备份在 {manifest.directory}。"}
         steps.append({"step": "write", "detail": "；".join(applied) if applied else "没有需要写入的改动"})
 
         # 用修正后的配置重发真实请求验证。如果刚改的是持久化环境变量，当前进程的
@@ -391,6 +466,17 @@ class Engine:
         elif any(h.result == RESULT_MANUAL for h in report.harnesses):
             report.result = RESULT_MANUAL
             report.message = "发现的问题里没有能自动修复的，需要人工处理。"
+        elif any(h.result == RESULT_NO_CONFIG for h in report.harnesses):
+            # 一部分客户端正常、另一部分还没配置过：这时候既不能说「全部通过」
+            # （有的根本还没配），也不该说「没有配置过」（有的已经在正常用了），
+            # 要如实说清楚是哪些还没配。
+            report.result = RESULT_NO_CONFIG
+            unconfigured = "、".join(h.display_name for h in report.harnesses
+                                     if h.result == RESULT_NO_CONFIG)
+            configured = "、".join(h.display_name for h in report.harnesses
+                                   if h.result != RESULT_NO_CONFIG)
+            report.message = (f"{configured} 检查通过；{unconfigured} 还没配置过——"
+                              f"如果也要用，可以直接生成一份最小配置。")
         else:
             report.result = RESULT_HEALTHY
             any_e2e = any(h.e2e_results for h in report.harnesses)

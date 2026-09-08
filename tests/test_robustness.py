@@ -39,11 +39,16 @@ class TestWriteFailure(unittest.TestCase):
                 os.chmod(path, stat.S_IRUSR | stat.S_IWUSR)
 
     def test_engine_surfaces_write_failure_path_exists(self):
-        """至少要保证这条分支在代码里是真的接上了的（root 下也能验证）。"""
+        """至少要保证这条分支在代码里是真的接上了的（root 下也能验证）。
+
+        写入失败时要做三件事：如实说失败、把已经写了一部分的改动回滚掉、
+        并且 RuntimeError 也要接住——改持久化环境变量在不支持的平台上抛的
+        就是 RuntimeError，只接 OSError 会让它变成未捕获异常。"""
         import inspect
         src = inspect.getsource(E.Engine.fix)
         self.assertIn("写入配置失败", src)
-        self.assertIn("原配置没有被改动", src)
+        self.assertIn("(OSError, RuntimeError)", src)
+        self.assertIn("fixer.rollback(manifest)", src)
 
 
 class TestProfileHandling(unittest.TestCase):

@@ -16,6 +16,20 @@ def _c(text: str, color: str) -> str:
     return f"{color}{text}{RESET}"
 
 
+def _ask(prompt: str) -> str:
+    """交互提问。拿不到标准输入时（比如被打包成窗口程序、或者在没有终端的
+    环境里跑）不能直接 input()——那会抛 RuntimeError: lost sys.stdin。
+    这种情况下当成「用户没有选择」，按跳过处理，并说明该怎么非交互地跑。"""
+    if sys.stdin is None or not sys.stdin.isatty():
+        try:
+            return input(prompt)
+        except (RuntimeError, OSError, EOFError):
+            print(_c("  当前环境拿不到键盘输入，这一步跳过。"
+                     "需要非交互地执行可以加 --yes（自动修复）或 --no-fix（只检测）。", DIM))
+            return ""
+    return input(prompt)
+
+
 def _print_findings(findings, only_issues=False) -> None:
     for f in findings:
         if only_issues and f.ok:
@@ -124,7 +138,7 @@ def run(argv: Optional[List[str]] = None) -> int:
                 print(_c("  这一项需要手动选择，--yes 不会替你选，已跳过。", DIM))
                 exit_code = max(exit_code, 3)
                 continue
-            ans = input("  输入序号选择，回车跳过：").strip()
+            ans = _ask("  输入序号选择，回车跳过：").strip()
             if not ans:
                 print("  已跳过。")
                 exit_code = max(exit_code, 3)
@@ -160,7 +174,7 @@ def run(argv: Optional[List[str]] = None) -> int:
             print()
             continue
         if not args.yes:
-            ans = input(f"  发现 {len(fixable)} 项可以自动修复的问题，是否修复？会先备份 [y/N] ")
+            ans = _ask(f"  发现 {len(fixable)} 项可以自动修复的问题，是否修复？会先备份 [y/N] ")
             if ans.strip().lower() != "y":
                 print("  已跳过修复。")
                 exit_code = max(exit_code, 3)

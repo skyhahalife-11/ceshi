@@ -59,6 +59,17 @@ class Handler(BaseHTTPRequestHandler):
             self._reply(404, {"error": f"no route for path {self.path}"})
             return
 
+        # 报文形态也要校验，不能两个端点都收同一份请求：否则「按 harness 各自的
+        # 真实形态发请求」这件事有没有真的做到，在测试里根本看不出来。
+        # anthropic-version 是 Anthropic 协议特有的必需头，OpenAI 兼容端点不该收到它。
+        version_header = self.headers.get("anthropic-version")
+        if self.path.endswith("/chat/completions") and version_header:
+            self._reply(400, {"error": "openai-style endpoint got anthropic-version header"})
+            return
+        if self.path.endswith("/v1/messages") and not version_header:
+            self._reply(400, {"error": "anthropic-style endpoint requires anthropic-version"})
+            return
+
         key = (self.headers.get("x-api-key")
                or _bearer(self.headers.get("Authorization"))
                or self.headers.get("Token"))

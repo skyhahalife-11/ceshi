@@ -418,7 +418,12 @@ class TestChecks(unittest.TestCase):
                 self.assertFalse(f.ok, typo)
                 self.assertEqual(f.fix_value, target, typo)
 
-    def test_layer_conflict_flagged_as_error(self):
+    def test_layer_conflict_flagged_but_not_claimed_auto_fixable(self):
+        """多层取值不一致要报出来，但不能声称能一键修复。
+
+        Suture 只写实际生效的那一层，而那一层的值本来就是当前这个，写回去
+        什么都没变、另一层的不一致原样保留——用户却会看到「修复成功」。
+        所以这一项必须是 FIXABLE_NO，并且备注里要说清楚该自己去哪儿删。"""
         with Sandbox() as sb:
             write_json(os.path.join(sb.home, ".claude", "settings.json"),
                        {"env": {"ANTHROPIC_BASE_URL": "https://global"}})
@@ -427,9 +432,13 @@ class TestChecks(unittest.TestCase):
             cfg = ClaudeCodeAdapter().read(env=sb.env, home=sb.home, project_dir=sb.project)
             findings = checks.check_layer_consistency(cfg)
             self.assertEqual(len(findings), 1)
-            self.assertFalse(findings[0].ok)
-            self.assertEqual(findings[0].fixable, checks.FIXABLE_YES)
-            self.assertEqual(findings[0].fix_value, "https://project")   # 统一到生效值
+            f = findings[0]
+            self.assertFalse(f.ok)
+            self.assertEqual(f.fixable, checks.FIXABLE_NO)
+            self.assertIsNone(f.fix_field)      # 不给 engine 留下可写入的目标
+            self.assertIsNone(f.fix_value)
+            self.assertIn("项目级配置", f.detail)   # 说清楚现在生效的是哪一层
+            self.assertIn("删掉", f.note)            # 说清楚该怎么真正解决
 
     def test_unknown_key_typo_detected(self):
         with Sandbox() as sb:

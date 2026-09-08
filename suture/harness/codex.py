@@ -143,7 +143,6 @@ class CodexAdapter(HarnessAdapter):
         auth = build_resolved(FIELD_AUTH,
                               [LayerValue(f"环境变量 {env_key_field.value}", "", secret)] if secret else [])
         cfg.fields[FIELD_AUTH] = auth
-        cfg._env_key_field = env_key_field      # 供检测层使用
         cfg._provider_id = provider_id
         if provider_id is None and any(f.exists for f in (u, p)):
             cfg.notes.append("配置里没有指定 model_provider，无法确定该看哪个 provider 分块的地址和鉴权设置。")

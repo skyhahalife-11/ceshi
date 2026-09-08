@@ -88,6 +88,13 @@ class HarnessConfig:
     auth_conflict: Optional[str] = None       # 两处同时填了鉴权信息时的说明
     extra_auth_headers: List[ExtraAuthHeader] = field(default_factory=list)
 
+    # 鉴权值可能存在多个不同名字的变量里（Claude Code 的 ANTHROPIC_API_KEY 和
+    # ANTHROPIC_AUTH_TOKEN 就是两个都认的位置，用哪个决定了客户端发哪个请求头）。
+    # 修复鉴权时必须改「当前真的在生效的那个变量」，不能写死其中一个，否则会
+    # 凭空新建一个变量、把请求头悄悄换掉，等于制造一个新冲突。
+    auth_env_var: Optional[str] = None        # 当前生效的鉴权值存在哪个环境变量里
+    auth_rival_env_vars: List[str] = field(default_factory=list)  # 同时设置着的其它鉴权变量
+
     # DeepSeek Harness 的模型是一份注册清单而不是单个选中值，单独放在这里，
     # 每一项都要对着网关路由表校验。另外两个 harness 这里为空。
     model_candidates: List[str] = field(default_factory=list)
@@ -117,7 +124,11 @@ class HarnessAdapter:
         raise NotImplementedError
 
     # ---- 读取 ----
-    def read(self, env=None, home=None, project_dir=None) -> HarnessConfig:
+    # 签名要跟三个实现和所有调用点保持一致：known_keys 是规则文件里登记的合法配置项
+    # （用来识别写错的键名），accepted_headers 是网关认的鉴权请求头名单（用来判断
+    # 自定义头里哪些算鉴权来源）。之前基类少了这两个参数，照基类签名调会 TypeError。
+    def read(self, env=None, home=None, project_dir=None,
+             known_keys=None, accepted_headers=None) -> HarnessConfig:
         raise NotImplementedError
 
     # ---- 写入 ----
@@ -139,11 +150,21 @@ class HarnessAdapter:
     # 只有像 Claude Code CLI 这种「环境变量优先于配置文件」的 harness 才需要实现这三个；
     # 默认当作没有这一层——Codex/DeepSeek 的 base_url/model 从不来自环境变量，用默认值即可，
     # 不需要每个适配器都写一遍空实现。
-    def env_var_targets(self, cfg: HarnessConfig, changes: Dict[str, str]) -> Dict[str, str]:
+    def env_var_targets(self, cfg: HarnessConfig,
+                        changes: Dict[str, str]) -> Dict[str, Optional[str]]:
         """给定这次要写的 {逻辑字段: 新值}，挑出其中「当前实际生效层就是环境变量」的那些，
         映射成 {环境变量名: 新值}。这是一次纯读取、不做任何修改的预览，
-        用来在真正写之前决定该备份哪些环境变量、真正写的时候该改哪一层。"""
+        用来在真正写之前决定该备份哪些环境变量、真正写的时候该改哪一层。
+
+        值为 None 表示「这个变量要被删掉」——鉴权同时填在两个变量里时，
+        统一到一处就意味着留一个、删另一个。删掉的那个也在这份清单里，
+        所以它的原值一样会被备份，回滚时能恢复回来。"""
         return {}
+
+    def supports_persistent_env(self) -> bool:
+        """本平台能不能真的改持久化环境变量。改不了的时候要在动手之前就知道，
+        好如实告诉用户该自己去设哪个变量，而不是写到一半抛异常。"""
+        return False
 
     def read_persistent_env(self, name: str) -> Optional[str]:
         """读取某个环境变量当前持久化存储（注册表/shell 配置）里的值，

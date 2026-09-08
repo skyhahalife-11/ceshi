@@ -41,12 +41,6 @@ class Finding:
     choices: List[Dict[str, str]] = field(default_factory=list)
 
 
-@dataclass
-class InfoItem:
-    """仅供参考、不算错误的信息。"""
-    text: str
-
-
 # ---------- 配置文件语法 ----------
 
 def check_config_syntax(cfg: HarnessConfig) -> List[Finding]:
@@ -251,11 +245,15 @@ def check_auth(cfg: HarnessConfig, profile: Dict[str, Any]) -> List[Finding]:
                 current_value=mask_secret(extra.value)))
 
     if cfg.auth_conflict:
+        # fix_value 必须取去掉首尾空白之后的值：这一项只负责「统一到一处」，
+        # 不该把 auth-whitespace 已经指出的空格问题又带回来（两条修复项落在
+        # 同一个逻辑字段上，engine 合并时以纠正类为准，这里保持一致）。
         out.append(Finding(
             key="auth-conflict", label="鉴权字段位置", ok=False,
             detail=cfg.auth_conflict + "网关两个请求头都认，所以不会直接失败，"
                    "但两处并存以后改错地方很常见，建议统一到一处。",
-            fixable=FIXABLE_YES, fix_field=FIELD_AUTH, fix_value=cfg.field(FIELD_AUTH).value,
+            fixable=FIXABLE_YES, fix_field=FIELD_AUTH,
+            fix_value=(cfg.field(FIELD_AUTH).value or "").strip(),
             suggested_value="只保留一处"))
 
     # 主字段和自定义头同时生效、内容还不一样：客户端会把这几个请求头一起发给网关，
@@ -393,7 +391,13 @@ def _check_one_model(name: str, known: List[str], index: Dict[str, Any],
 
 def check_layer_consistency(cfg: HarnessConfig) -> List[Finding]:
     """按已确认的使用规范，项目级/用户层不应该覆盖网关相关配置，
-    出现不一致本身就算配置错误，需要统一到实际生效的值。"""
+    出现不一致本身就算配置错误，需要统一到实际生效的值。
+
+    这一项不提供「一键修复」：Suture 只写实际生效的那一层，而那一层的值
+    本来就是当前这个，写回去等于什么都没做——不一致的另一层原样保留，
+    重新检查还会再报一次，但用户已经看到「修复成功」了。真正消除不一致得去
+    删掉多余那一层，这跟 auth-multiple-active 一样交回给用户自己做，
+    Suture 不去动没被要求动的那一层配置。"""
     out: List[Finding] = []
     for key in (FIELD_BASE_URL, FIELD_MODEL):
         rf = cfg.field(key)
@@ -405,9 +409,9 @@ def check_layer_consistency(cfg: HarnessConfig) -> List[Finding]:
             key=f"conflict:{key}", label="多层配置取值不一致", ok=False,
             detail=f"同一项在多个地方设置了不同的值：实际生效的是{rf.source_layer}里的"
                    f"「{rf.value}」，另外 {others}。",
-            current_value=rf.value, suggested_value=rf.value,
-            fixable=FIXABLE_YES, fix_field=key, fix_value=rf.value,
-            note="修复会统一成实际生效的这个值，并且只改实际生效的那一层"))
+            current_value=rf.value, fixable=FIXABLE_NO,
+            note=f"现在起作用的是{rf.source_layer}里的值，其余层的同名设置不生效。"
+                 f"如果那些是早先配错留下的，需要自己去对应位置删掉，只保留一处"))
     return out
 
 
@@ -425,6 +429,3 @@ def run_all_checks(cfg: HarnessConfig, profile: Dict[str, Any]) -> List[Finding]
     findings += check_layer_consistency(cfg)
     return findings
 
-
-def collect_info(cfg: HarnessConfig) -> List[InfoItem]:
-    return [InfoItem(text=n) for n in cfg.notes]

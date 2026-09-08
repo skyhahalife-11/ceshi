@@ -31,14 +31,35 @@ def _endpoint(base_url: str, suffix: str) -> str:
     return base_url.strip().rstrip("/") + suffix
 
 
-def _headers(auth_headers: Dict[str, str]) -> dict:
+ANTHROPIC_VERSION = "2023-06-01"
+
+
+def _headers(auth_headers: Dict[str, str], style: str = "anthropic") -> dict:
     """auth_headers 是「请求头名字 -> 值」的完整集合，调用方已经按真实客户端
     的行为拼好了（比如 Authorization 要不要加 Bearer 前缀）——这里只管原样带上，
     不再替调用方决定该发哪一个、不发哪一个。真实客户端往往会同时发好几个
-    鉴权相关的头，探活/真实请求也应该照样一起发，而不是先替用户挑一个。"""
-    headers = {"content-type": "application/json", "anthropic-version": "2023-06-01"}
+    鉴权相关的头，探活/真实请求也应该照样一起发，而不是先替用户挑一个。
+
+    anthropic-version 是 Anthropic 协议特有的必需头，OpenAI 兼容协议里没有这个头。
+    验证请求的意义在于「跟真实客户端发的一样」，所以走 OpenAI 形态的 harness
+    （Codex）不该带它——带了就不是在验证用户真实会发的那种请求。"""
+    headers = {"content-type": "application/json"}
+    if style != "openai":
+        headers["anthropic-version"] = ANTHROPIC_VERSION
     headers.update(auth_headers or {})
     return headers
+
+
+def _payload(model: str, style: str) -> dict:
+    """按协议形态拼最小报文。
+
+    两种形态在这个最小报文上恰好可以用同一组字段：`messages` 的结构一致，
+    `max_tokens` 两边都认（OpenAI 新版推荐 max_completion_tokens，但兼容端点
+    普遍仍接受 max_tokens，而网关背后接的是多家厂商，用兼容性最好的那个）。
+    真正的差别在请求头，见 _headers()。以后如果 OpenAI 形态需要不同的报文结构，
+    改这一个函数就够，不用再去动调用链。"""
+    return {"model": model, "max_tokens": 16,
+            "messages": [{"role": "user", "content": "ping"}]}
 
 
 def _classify(status: Optional[int], exc: Optional[BaseException]) -> tuple:
@@ -63,11 +84,9 @@ def _classify(status: Optional[int], exc: Optional[BaseException]) -> tuple:
 
 def _send(base_url: str, auth_headers: Dict[str, str], model: str,
           timeout: float, suffix: str = "/v1/messages", style: str = "anthropic") -> ProbeResult:
-    payload = {"model": model, "max_tokens": 16,
-               "messages": [{"role": "user", "content": "ping"}]}
-    body = json.dumps(payload).encode("utf-8")
+    body = json.dumps(_payload(model, style)).encode("utf-8")
     req = urllib.request.Request(_endpoint(base_url, suffix), data=body,
-                                 headers=_headers(auth_headers), method="POST")
+                                 headers=_headers(auth_headers, style), method="POST")
     started = time.time()
     status, exc = None, None
     try:
