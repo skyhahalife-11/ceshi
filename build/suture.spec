@@ -31,12 +31,15 @@ except Exception:
     pass
 if sys.platform == "win32":
     # winforms/edgechromium 后端靠 pythonnet 在运行时加载 .NET 程序集，
-    # 这条路径也不是静态导入能看见的。
+    # 这条路径也不是静态导入能看见的。这里只是探测"装了没有"，探测本身
+    # 绝不能让构建失败——在 Windows ARM64 上 clr_loader 附带的原生 DLL
+    # 是 amd64 的，import 会在加载运行时那一步直接抛 RuntimeError，
+    # 不是 ImportError，只接 ImportError 会让这次探测反而弄崩整个构建。
     for extra_mod in ("clr", "clr_loader"):
         try:
             __import__(extra_mod)
             hidden.append(extra_mod)
-        except ImportError:
+        except Exception:
             pass
 
 a = Analysis(
